@@ -8,6 +8,9 @@ from multiprocessing import Pool
 from typing import Callable
 
 import numpy as np
+import nibabel as nib
+from skimage.transform import resize
+from PIL import Image
 
 from utils import map_, tqdm_
 
@@ -20,8 +23,18 @@ Which is compatible with standard image formats (PNG)
 """
 def norm_arr(img: np.ndarray) -> np.ndarray:
     # TODO: your code here
+    # The case where all pixels have the same value
+    min_val, max_val = np.min(img), np.max(img)
+    if min_val == max_val:
+        return np.zeros_like(img, dtype=np.uint8)
 
-    raise NotImplementedError("Implement norm_arr")
+    # Min-max normalization to scale values to the [0, 1]
+    normalized_img = (img - min_val) / (max_val - min_val)
+
+    # Scale to [0, 255] and convert to uint8
+    scaled_img = (normalized_img * 255).astype(np.uint8)
+
+    return scaled_img
 
 
 def sanity_ct(ct, x, y, z, dx, dy, dz) -> bool:
@@ -80,8 +93,68 @@ def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int
     assert ct_path.exists()
 
     # --------- FILL FROM HERE -----------
+    # Load the NIfTI file for the CT scan
+    ct_nii = nib.load(ct_path)
+    ct = ct_nii.get_fdata()
 
-    raise NotImplementedError("Implement slice_patient")
+    # Extract voxel spacing and dimensions
+    dx, dy, dz = ct_nii.header.get_zooms()
+    x, y, z = ct.shape
+
+    # Convert CT data to int
+    ct = ct.astype(np.int16)
+    sanity_ct(ct, x, y, z, dx, dy, dz)
+
+    # Load gt data if not in test mode
+    if not test_mode:
+        gt_path: Path = id_path / f"GT.nii.gz"
+        assert gt_path.exists()
+        gt_nii = nib.load(gt_path)
+        gt = gt_nii.get_fdata().astype(np.uint8)
+
+        sanity_gt(gt, ct)
+
+    # Normalize the CT
+    ct_normalized = norm_arr(ct)
+
+    # Create destination paths
+    img_dest = dest_path / "img"
+    img_dest.mkdir(parents=True, exist_ok=True)
+    if not test_mode:
+        gt_dest = dest_path / "gt"
+        gt_dest.mkdir(parents=True, exist_ok=True)
+
+    # Slice the volume along the z-axis
+    print(f"Slicing patient {id_} with shape {ct.shape} and spacing {(dx, dy, dz)}")
+    for idz in range(z):
+        ct_slice = ct_normalized[:, :, idz]
+
+        # Resize the CT slice with bi-linear interpolation and anti-aliasing
+        ct_resized = resize(ct_slice,
+                              shape,
+                              order=1,
+                              preserve_range=True,
+                              anti_aliasing=True).astype(np.uint8)
+
+        filename = f"{id_}_{idz:04d}.png"
+        Image.fromarray(ct_resized).save(img_dest / filename)
+
+        if not test_mode:
+            gt_slice = gt[:, :, idz]
+            # Resize GT slice with NN-interpolation to preserve labels
+            gt_resized = resize(gt_slice,
+                                shape,
+                                order=0,
+                                preserve_range=True,
+                                anti_aliasing=False).astype(np.uint8)
+
+            # Map labels to be visually distinct
+            gt_resized *= 63
+            assert gt_resized.dtype == np.uint8
+            assert set(np.unique(gt_resized)) <= set([0, 63, 126, 189, 252])
+            Image.fromarray(gt_resized).save(gt_dest / filename)
+
+    return (dx, dy, dz)
 
 
 """
@@ -95,8 +168,16 @@ Requirements:
 
 def get_splits(src_path: Path, retains: int) -> tuple[list[str], list[str]]:
     # TODO: your code here
+    train_path = src_path / "train"
+    assert train_path.exists(), f"Train path {train_path} does not exist"
 
-    raise NotImplementedError("Implement get_splits")
+    patient_ids = [folder.name for folder in train_path.iterdir() if folder.is_dir()]
+    random.shuffle(patient_ids)
+
+    validation_ids = patient_ids[:retains]
+    training_ids = patient_ids[retains:]
+    
+    return training_ids, validation_ids
 
 def main(args: argparse.Namespace):
     src_path: Path = Path(args.source_dir)
