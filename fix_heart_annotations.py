@@ -22,12 +22,12 @@ def create_forward_transform_neg_offset() -> np.ndarray:
         [0, 0, 0,   1]
     ], dtype=np.float64)
 
-    # R2: rotation
-    phi = -(27.0 / 180.0) * np.pi
+    # R2: rotation (change from - to to + since we invert the transform later)
+    phi = (27.0 / 180.0) * np.pi
     c, s = np.cos(phi), np.sin(phi)
     R2 = np.array([
-        [c, s, 0, 0],
-        [-s,  c, 0, 0],
+        [c, -s, 0, 0],
+        [s,  c, 0, 0],
         [0,  0, 1, 0],
         [0,  0, 0, 1]
     ], dtype=np.float64)
@@ -99,7 +99,7 @@ def compute_dice_against_clean(patient_folder: Path, restored_mask: np.ndarray) 
     clean_heart = (clean_data == HEART)
 
     d = dice_score(restored_mask, clean_heart)
-    print(f"  - {patient_folder.name}: Dice(heart vs reference) = {d:.4f} "
+    print(f"  - {patient_folder.name}: Dice score (heart vs reference) = {d:.4f} "
           f"[restored voxels={int(restored_mask.sum())}, ref voxels={int(clean_heart.sum())}]")
 
 
