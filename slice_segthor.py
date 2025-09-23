@@ -1,3 +1,27 @@
+#!/usr/bin/env python3.7
+
+# MIT License
+
+# Copyright (c) 2024 Hoel Kervadec
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import pickle
 import random
 import argparse
@@ -9,32 +33,22 @@ from typing import Callable
 
 import numpy as np
 import nibabel as nib
+from skimage.io import imsave
 from skimage.transform import resize
-from PIL import Image
 
 from utils import map_, tqdm_
 
 
-"""
-TODO: Implement image normalisation.
-CT images have a wide range of intensity values (Hounsfield units)
-Goal: normalize an image array to the range [0, 255]  and return it as a dtype=uint8
-Which is compatible with standard image formats (PNG)
-"""
 def norm_arr(img: np.ndarray) -> np.ndarray:
-    # TODO: your code here
-    # The case where all pixels have the same value
-    min_val, max_val = np.min(img), np.max(img)
-    if min_val == max_val:
-        return np.zeros_like(img, dtype=np.uint8)
+    casted = img.astype(np.float32)
+    shifted = casted - casted.min()
+    norm = shifted / shifted.max()
+    res = 255 * norm
 
-    # Min-max normalization to scale values to the [0, 1]
-    normalized_img = (img - min_val) / (max_val - min_val)
+    assert 0 == res.min(), res.min()
+    assert res.max() == 255, res.max()
 
-    # Scale to [0, 255] and convert to uint8
-    scaled_img = (normalized_img * 255).astype(np.uint8)
-
-    return scaled_img
+    return res.astype(np.uint8)
 
 
 def sanity_ct(ct, x, y, z, dx, dy, dz) -> bool:
@@ -52,6 +66,7 @@ def sanity_ct(ct, x, y, z, dx, dy, dz) -> bool:
 
     return True
 
+
 def sanity_gt(gt, ct) -> bool:
     assert gt.shape == ct.shape
     assert gt.dtype in [np.uint8], gt.dtype
@@ -62,151 +77,119 @@ def sanity_gt(gt, ct) -> bool:
     return True
 
 
-"""
-TODO: Implement patient slicing.
-Context:
-  - Given an ID and paths, load the NIfTI CT volume and (if not test_mode) the GT volume.
-  - Validate with sanity_ct / sanity_gt.
-  - Normalise CT with norm_arr().
-  - Slice the 3D volumes into 2D slices, resize to `shape`, and save PNGs.
-  - Currently we have groundtruth masks marked as {0,1,2,3,4} but those values are hard to distinguish in a grayscale png.
-    Multiplying by 63 maps them to {0,63,126,189,252}, which keeps labels visually distinct in a grayscale PNG.
-    You can use the following code, which works for already sliced 2d images:
-    gt_slice *= 63
-    assert gt_slice.dtype == np.uint8, gt_slice.dtype
-    assert set(np.unique(gt_slice)) <= set([0, 63, 126, 189, 252]), np.unique(gt_slice)
-  - Return the original voxel spacings (dx, dy, dz).
+resize_: Callable = partial(resize, mode="constant", preserve_range=True, anti_aliasing=False)
 
-Hints:
-  - Use nibabel to load NIfTI images.
-  - Use skimage.transform.resize (tip: anti_aliasing might be useful)
-  - The PNG files should be stored in the dest_path, organised into separate subfolders: train/img, train/gt, val/img, and val/gt
-  - Use consistent filenames: e.g. f"{id_}_{idz:04d}.png" inside subfolders "img" and "gt"; where idz is the slice index.
-"""
 
-def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int, int], test_mode=False)\
-        -> tuple[float, float, float]:
-
+def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int, int],
+                  test_mode: bool = False) -> tuple[float, float, float]:
     id_path: Path = source_path / ("train" if not test_mode else "test") / id_
-    ct_path: Path = (id_path / f"{id_}.nii.gz")
-    assert id_path.exists()
-    assert ct_path.exists()
 
-    # --------- FILL FROM HERE -----------
-    # Load the NIfTI file for the CT scan
-    ct_nii = nib.load(ct_path)
-    ct = ct_nii.get_fdata()
-
-    # Extract voxel spacing and dimensions
-    dx, dy, dz = ct_nii.header.get_zooms()
+    ct_path: Path = (id_path / f"{id_}.nii.gz") if not test_mode else (source_path / "test" / f"{id_}.nii.gz")
+    nib_obj = nib.load(str(ct_path))
+    ct: np.ndarray = np.asarray(nib_obj.dataobj)
+    # dx, dy, dz = nib_obj.header.get_zooms()
     x, y, z = ct.shape
+    dx, dy, dz = nib_obj.header.get_zooms()
 
-    # Convert CT data to int
-    ct = ct.astype(np.int16)
-    sanity_ct(ct, x, y, z, dx, dy, dz)
+    assert sanity_ct(ct, *ct.shape, *nib_obj.header.get_zooms())
 
-    # Load gt data if not in test mode
+    gt: np.ndarray
     if not test_mode:
-        gt_path: Path = id_path / f"GT.nii.gz"
-        assert gt_path.exists()
-        gt_nii = nib.load(gt_path)
-        gt = gt_nii.get_fdata().astype(np.uint8)
+        gt_path: Path = id_path / "GT.nii.gz"
+        gt_nib = nib.load(str(gt_path))
+        # print(nib_obj.affine, gt_nib.affine)
+        gt = np.asarray(gt_nib.dataobj)
+        assert sanity_gt(gt, ct)
+    else:
+        gt = np.zeros_like(ct, dtype=np.uint8)
 
-        sanity_gt(gt, ct)
+    norm_ct: np.ndarray = norm_arr(ct)
 
-    # Normalize the CT
-    ct_normalized = norm_arr(ct)
+    to_slice_ct = norm_ct
+    to_slice_gt = gt
 
-    # Create destination paths
-    img_dest = dest_path / "img"
-    img_dest.mkdir(parents=True, exist_ok=True)
-    if not test_mode:
-        gt_dest = dest_path / "gt"
-        gt_dest.mkdir(parents=True, exist_ok=True)
-
-    # Slice the volume along the z-axis
-    print(f"Slicing patient {id_} with shape {ct.shape} and spacing {(dx, dy, dz)}")
     for idz in range(z):
-        ct_slice = ct_normalized[:, :, idz]
+        img_slice = resize_(to_slice_ct[:, :, idz], shape).astype(np.uint8)
+        gt_slice = resize_(to_slice_gt[:, :, idz], shape, order=0).astype(np.uint8)
+        assert img_slice.shape == gt_slice.shape
+        gt_slice *= 63
+        assert gt_slice.dtype == np.uint8, gt_slice.dtype
+        # assert set(np.unique(gt_slice)) <= set(range(5))
+        assert set(np.unique(gt_slice)) <= set([0, 63, 126, 189, 252]), np.unique(gt_slice)
 
-        # Resize the CT slice with bi-linear interpolation and anti-aliasing
-        ct_resized = resize(ct_slice,
-                              shape,
-                              order=1,
-                              preserve_range=True,
-                              anti_aliasing=True).astype(np.uint8)
+        arrays: list[np.ndarray] = [img_slice, gt_slice]
 
-        filename = f"{id_}_{idz:04d}.png"
-        Image.fromarray(ct_resized).save(img_dest / filename)
+        subfolders: list[str] = ["img", "gt"]
+        assert len(arrays) == len(subfolders)
+        for save_subfolder, data in zip(subfolders,
+                                        arrays):
+            filename = f"{id_}_{idz:04d}.png"
 
-        if not test_mode:
-            gt_slice = gt[:, :, idz]
-            # Resize GT slice with NN-interpolation to preserve labels
-            gt_resized = resize(gt_slice,
-                                shape,
-                                order=0,
-                                preserve_range=True,
-                                anti_aliasing=False).astype(np.uint8)
+            save_path: Path = Path(dest_path, save_subfolder)
+            save_path.mkdir(parents=True, exist_ok=True)
 
-            # Map labels to be visually distinct
-            gt_resized *= 63
-            assert gt_resized.dtype == np.uint8
-            assert set(np.unique(gt_resized)) <= set([0, 63, 126, 189, 252])
-            Image.fromarray(gt_resized).save(gt_dest / filename)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning)
+                imsave(str(save_path / filename), data)
 
-    return (dx, dy, dz)
+    return dx, dy, dz
 
 
-"""
-TODO: Implement a simple train/val split.
-Requirements:
-  - List patient IDs from <src_path>/train (folder names).
-  - Shuffle them (respect a seed set in main()).
-  - Take the first `retains` as validation, and the rest as training.
-  - Return (training_ids, validation_ids).
-"""
+def get_splits(src_path: Path, retains: int, fold: int) -> tuple[list[str], list[str], list[str]]:
+    ids: list[str] = sorted(map_(lambda p: p.name, (src_path / 'train').glob('*')))
+    print(f"Founds {len(ids)} in the id list")
+    print(ids[:10])
+    assert len(ids) > retains
 
-def get_splits(src_path: Path, retains: int) -> tuple[list[str], list[str]]:
-    # TODO: your code here
-    train_path = src_path / "train"
-    assert train_path.exists(), f"Train path {train_path} does not exist"
+    random.shuffle(ids)  # Shuffle before to avoid any problem if the patients are sorted in any way
+    validation_slice = slice(fold * retains, (fold + 1) * retains)
+    validation_ids: list[str] = ids[validation_slice]
+    assert len(validation_ids) == retains
 
-    patient_ids = [folder.name for folder in train_path.iterdir() if folder.is_dir()]
-    random.shuffle(patient_ids)
+    training_ids: list[str] = [e for e in ids if e not in validation_ids]
+    assert (len(training_ids) + len(validation_ids)) == len(ids)
 
-    validation_ids = patient_ids[:retains]
-    training_ids = patient_ids[retains:]
-    
-    return training_ids, validation_ids
+    test_ids: list[str] = sorted(map_(lambda p: Path(p.stem).stem, (src_path / 'test').glob('*')))
+    print(f"Founds {len(test_ids)} test ids")
+    print(test_ids[:10])
+
+    return training_ids, validation_ids, test_ids
+
 
 def main(args: argparse.Namespace):
     src_path: Path = Path(args.source_dir)
     dest_path: Path = Path(args.dest_dir)
-    if not dest_path.exists():
-        dest_path.mkdir(parents=True, exist_ok=True)
 
+    # Assume the clean up is done before calling the script
     assert src_path.exists()
-    assert dest_path.exists()
+    assert not dest_path.exists()
 
     training_ids: list[str]
     validation_ids: list[str]
-    training_ids, validation_ids = get_splits(src_path, args.retains)
-
+    test_ids: list[str]
+    training_ids, validation_ids, test_ids = get_splits(src_path, args.retains, args.fold)
 
     resolution_dict: dict[str, tuple[float, float, float]] = {}
 
-    for mode, split_ids in zip(["train", "val"], [training_ids, validation_ids]):
+    split_ids: list[str]
+    for mode, split_ids in zip(["train", "val", "test"], [training_ids, validation_ids, test_ids]):
         dest_mode: Path = dest_path / mode
         print(f"Slicing {len(split_ids)} pairs to {dest_mode}")
 
         pfun: Callable = partial(slice_patient,
                                  dest_path=dest_mode,
                                  source_path=src_path,
-                                 shape=tuple(args.shape))
-
+                                 shape=tuple(args.shape),
+                                 test_mode=mode == 'test')
         resolutions: list[tuple[float, float, float]]
         iterator = tqdm_(split_ids)
-        resolutions = list(map(pfun, iterator))
+        match args.process:
+            case 1:
+                resolutions = list(map(pfun, iterator))
+            case -1:
+                resolutions = Pool().map(pfun, iterator)
+            case _ as p:
+                resolutions = Pool(p).map(pfun, iterator)
 
         for key, val in zip(split_ids, resolutions):
             resolution_dict[key] = val
@@ -216,22 +199,24 @@ def main(args: argparse.Namespace):
         print(f"Saved spacing dictionnary to {f}")
 
 
-
-
 def get_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description = "Slicing parameters")
-
+    parser = argparse.ArgumentParser(description='Slicing parameters')
     parser.add_argument('--source_dir', type=str, required=True)
     parser.add_argument('--dest_dir', type=str, required=True)
-    parser.add_argument('--shape', type=int, nargs="+", default=[256, 256])
-    parser.add_argument('--retains', type=int, default=10, help="Number of retained patient for the validation data")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
+    parser.add_argument('--shape', type=int, nargs="+", default=[256, 256])
+    parser.add_argument('--retains', type=int, default=25, help="Number of retained patient for the validation data")
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--fold', type=int, default=0)
+    parser.add_argument('--process', '-p', type=int, default=1,
+                        help="The number of cores to use for processing")
     args = parser.parse_args()
     random.seed(args.seed)
+
     print(args)
 
     return args
+
 
 if __name__ == "__main__":
     main(get_args())
