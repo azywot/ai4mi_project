@@ -50,9 +50,10 @@ def create_forward_transform_neg_offset() -> np.ndarray:
 
 # -------------------- dice metric -------------------- #
 def dice_score(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
+    eps = 1e-8
     inter = np.count_nonzero(mask_a & mask_b)
-    total = mask_a.sum() + mask_b.sum()
-    return (2.0 * inter / total) if total > 0 else 0.0
+    total = mask_a.sum() + mask_b.sum() + eps
+    return ((2.0 * inter + eps) / total )
 
 
 # -------------------- fix function -------------------- #
