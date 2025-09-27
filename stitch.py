@@ -2,6 +2,7 @@
 
 import argparse
 import re
+import shutil
 from pathlib import Path
 from typing import Dict, List, Tuple
 import numpy as np
@@ -14,13 +15,17 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--data_folder", type=str, required=True,
                         help="Folder containing sliced data (e.g., data/prediction/best_epoch/val)")
     parser.add_argument("--dest_folder", type=str, required=True,
-                        help="Destination folder for stitched data (e.g., val/pred)")
+                        help="Destination folder for stitched predictions (e.g., val/pred)")
     parser.add_argument("--num_classes", type=int, required=True,
                         help="Number of classes (e.g., 5)")
     parser.add_argument("--grp_regex", type=str, required=True,
-                        help="Pattern for filename grouping (e.g., '(Patient\\d+)_\\d{4}' or '(Patient_\\d\\d)_\\d\\d\\d\\d')")
+                        help="Pattern for filename grouping "
+                             "(e.g., '(Patient\\d+)_\\d{4}' or '(Patient_\\d\\d)_\\d\\d\\d\\d')")
     parser.add_argument("--source_scan_pattern", type=str, required=True,
-                        help="Pattern to original scans for metadata (e.g., 'data/segthor_fixed/train/{id_}/GT.nii.gz')")
+                        help="Pattern to original GT scans for metadata "
+                             "(e.g., 'data/segthor_fixed/train/{id_}/GT.nii.gz')")
+    parser.add_argument("--copy-gt", action="store_true",
+                        help="If set, copy the original GT files into val/gt/")
     return parser.parse_args()
 
 
@@ -38,7 +43,7 @@ def group_slices_by_patient(data_folder: Path, grp_regex: str) -> Dict[str, List
         else:
             print(f"Warning: Could not extract patient ID from {slice_file.name}")
 
-    # Sort slices by filename to ensure correct order (assumes zero-padded indices)
+    # Sort slices by filename
     for patient_id in patient_slices:
         patient_slices[patient_id].sort(key=lambda x: x.name)
 
@@ -52,11 +57,10 @@ def load_slice_as_segmentation(slice_path: Path, num_classes: int) -> np.ndarray
     img = Image.open(slice_path)
     slice_array = np.array(img)
 
-    # If it's a grayscale (or palette) image with class indices
     if slice_array.ndim == 2:
         return slice_array.astype(np.uint8)
 
-    # If it's RGB/A, take the first channel (assumes class indices stored in a channel)
+    # take the first channel if multiple channels
     if slice_array.ndim == 3:
         return slice_array[:, :, 0].astype(np.uint8)
 
@@ -78,7 +82,6 @@ def get_original_metadata(source_scan_pattern: str, patient_id: str) -> Tuple[Tu
     if len(original_shape) < 3:
         raise ValueError(f"Expected at least 3D NIfTI for {patient_id}, got shape {original_shape}")
 
-    # Use only first 3 dims (ignore channels/time if present)
     return (int(original_shape[0]), int(original_shape[1]), int(original_shape[2])), original_affine
 
 
@@ -86,8 +89,6 @@ def stitch_patient_slices(slice_files: List[Path], num_classes: int,
                           original_shape: Tuple[int, int, int]) -> np.ndarray:
     """Stitch 2D slices back into a 3D volume, matching the original in-plane size."""
     height, width, depth = original_shape  # (H, W, D)
-
-    # Preallocate volume to match original shape
     volume = np.zeros((height, width, depth), dtype=np.uint8)
 
     for i, slice_file in enumerate(slice_files):
@@ -99,6 +100,7 @@ def stitch_patient_slices(slice_files: List[Path], num_classes: int,
 
         # Resize slice to (height, width) if needed
         if slice_data.shape != (height, width):
+            # print(f"Resizing slice {slice_file.name} from {slice_data.shape} to {(height, width)}")
             from skimage.transform import resize
             slice_data = resize(
                 slice_data, (height, width),
@@ -125,6 +127,20 @@ def save_stitched_volume(volume: np.ndarray, affine: np.ndarray,
     print(f"Saved stitched volume: {output_file}")
 
 
+def copy_gt_files(patient_ids: List[str], source_scan_pattern: str, dest_folder: Path):
+    """Copy original GT files to the destination folder for evaluation."""
+    dest_folder.mkdir(parents=True, exist_ok=True)
+    for pid in patient_ids:
+        source_path = Path(source_scan_pattern.format(id_=pid))
+        if not source_path.exists():
+            print(f"Warning: GT not found for {pid} at {source_path}")
+            continue
+
+        dest_path = dest_folder / f"{pid}.nii.gz"
+        shutil.copy(source_path, dest_path)
+        print(f"Copied GT for {pid} to {dest_path}")
+
+
 def main():
     args = get_args()
 
@@ -139,6 +155,7 @@ def main():
     print(f"Number of classes: {args.num_classes}")
     print(f"Grouping regex: {args.grp_regex}")
     print(f"Source scan pattern: {args.source_scan_pattern}")
+    print(f"Copy GT enabled: {args.copy_gt}")
 
     # Group slices by patient
     patient_slices = group_slices_by_patient(data_folder, args.grp_regex)
@@ -148,7 +165,7 @@ def main():
 
     print(f"Found {len(patient_slices)} patients")
 
-    # Process each patient
+    # Process each patient for predictions
     for patient_id, slice_files in patient_slices.items():
         print(f"\nProcessing {patient_id} with {len(slice_files)} slices...")
 
@@ -167,7 +184,15 @@ def main():
             print(f"Error processing {patient_id}: {e}")
             continue
 
+    # copy GT files
+    if args.copy_gt:
+        gt_dest = dest_folder.parent / "gt"
+        print(f"\nCopying GT files to {gt_dest}...")
+        copy_gt_files(list(patient_slices.keys()), args.source_scan_pattern, gt_dest)
+
     print(f"\nStitching completed. Results saved to: {dest_folder}")
+    if args.copy_gt:
+        print(f"GT files copied to: {gt_dest}")
 
 
 if __name__ == "__main__":
