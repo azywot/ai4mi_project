@@ -37,6 +37,7 @@ from skimage.io import imsave
 from skimage.transform import resize
 
 from utils import map_, tqdm_
+import preprocessing
 
 
 def norm_arr(img: np.ndarray) -> np.ndarray:
@@ -81,7 +82,7 @@ resize_: Callable = partial(resize, mode="constant", preserve_range=True, anti_a
 
 
 def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int, int],
-                  test_mode: bool = False) -> tuple[float, float, float]:
+                  test_mode: bool = False, use_preprocessing: bool = False) -> tuple[float, float, float]:
     id_path: Path = source_path / ("train" if not test_mode else "test") / id_
 
     ct_path: Path = (id_path / f"{id_}.nii.gz") if not test_mode else (source_path / "test" / f"{id_}.nii.gz")
@@ -89,7 +90,9 @@ def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int
     ct: np.ndarray = np.asarray(nib_obj.dataobj)
     # dx, dy, dz = nib_obj.header.get_zooms()
     x, y, z = ct.shape
-    dx, dy, dz = nib_obj.header.get_zooms()
+    dx, dy, dz = nib_obj.header.get_zooms()   # nib gives (dx, dy, dz)
+    spacing_yxz = (dy, dx, dz)                # match array (y, x, z)
+
 
     assert sanity_ct(ct, *ct.shape, *nib_obj.header.get_zooms())
 
@@ -103,14 +106,36 @@ def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int
     else:
         gt = np.zeros_like(ct, dtype=np.uint8)
 
-    norm_ct: np.ndarray = norm_arr(ct)
+    if use_preprocessing:
+        # Optional: crop to body bbox to reduce background (can comment out first run)
+        ct_hu = preprocessing.hu_window(ct, -100, 400)  # still HU
+        y1, y2, x1, x2 = preprocessing.compute_body_bbox_from_hu(ct_hu, hu_thresh=-600, margin=16)
+        ct_cropped = ct[y1:y2, x1:x2, :]
+        gt_cropped = gt[y1:y2, x1:x2, :] if not test_mode else gt
+
+        # In-plane resample ONLY + HU clip + min–max (CT), and NN resample for GT
+        ct = preprocessing.preprocess_ct_inplane_only(
+            ct_cropped, spacing_yxz=spacing_yxz, hu_min=-100, hu_max=400, target_xy=1.0, do_resample=True
+        )
+        if not test_mode:
+            gt = preprocessing.preprocess_label_inplane_only(
+                gt_cropped, spacing_yxz=spacing_yxz, target_xy=1.0, do_resample=True
+            )
+
+        # Convert [0,1] → [0,255] for PNGs
+        norm_ct = (ct * 255.0).astype(np.uint8)
+    else:
+        # Baseline path unchanged
+        norm_ct = norm_arr(ct)
+
+    z = norm_ct.shape[2] 
 
     to_slice_ct = norm_ct
     to_slice_gt = gt
 
     for idz in range(z):
         img_slice = resize_(to_slice_ct[:, :, idz], shape).astype(np.uint8)
-        gt_slice = resize_(to_slice_gt[:, :, idz], shape, order=0).astype(np.uint8)
+        gt_slice  = resize_(to_slice_gt[:, :, idz], shape, order=0).astype(np.uint8)
         assert img_slice.shape == gt_slice.shape
         gt_slice *= 63
         assert gt_slice.dtype == np.uint8, gt_slice.dtype
@@ -180,7 +205,8 @@ def main(args: argparse.Namespace):
                                  dest_path=dest_mode,
                                  source_path=src_path,
                                  shape=tuple(args.shape),
-                                 test_mode=mode == 'test')
+                                 test_mode=mode == 'test',
+                                 use_preprocessing=args.use_preprocessing)
         resolutions: list[tuple[float, float, float]]
         iterator = tqdm_(split_ids)
         match args.process:
@@ -210,6 +236,10 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--fold', type=int, default=0)
     parser.add_argument('--process', '-p', type=int, default=1,
                         help="The number of cores to use for processing")
+    parser.add_argument("--use_preprocessing", action="store_true",
+    help="Preprocess: in-plane resample to 1mm (keep z), HU clip [-100,400], min–max to [0,1]")
+
+    
     args = parser.parse_args()
     random.seed(args.seed)
 
