@@ -50,7 +50,7 @@ from utils import (Dcm,
                    dice_coef,
                    save_images)
 
-from losses import (CrossEntropy)
+from losses import (CrossEntropy, DiceLoss, CEDiceLoss, FocalCrossEntropy)
 
 datasets_params: dict[str, dict[str, Any]] = {}
 # K for the number of classes
@@ -128,12 +128,25 @@ def runTraining(args):
     print(f">>> Setting up to train on {args.dataset} with {args.mode}")
     net, optimizer, device, train_loader, val_loader, K = setup(args)
 
+    # Determine class mask according to supervision mode
     if args.mode == "full":
-        loss_fn = CrossEntropy(idk=list(range(K)))  # Supervise both background and foreground
+        idk = list(range(K))  # Supervise both background and foreground
     elif args.mode in ["partial"] and args.dataset == 'SEGTHOR':
-        loss_fn = CrossEntropy(idk=[0, 1, 3, 4])  # Do not supervise the heart (class 2)
+        idk = [0, 1, 3, 4]  # Do not supervise the heart (class 2)
     else:
         raise ValueError(args.mode, args.dataset)
+
+    # Select loss according to --loss flag
+    if args.loss == 'ce':
+        loss_fn = CrossEntropy(idk=idk)
+    elif args.loss == 'dice':
+        loss_fn = DiceLoss(idk=idk)
+    elif args.loss == 'cedice':
+        loss_fn = CEDiceLoss(idk=idk)
+    elif args.loss == 'focal':
+        loss_fn = FocalCrossEntropy(idk=idk)
+    else:
+        raise ValueError(f"Unknown loss: {args.loss}")
 
     # Notice one has the length of the _loader_, and the other one of the _dataset_
     log_loss_tra: Tensor = torch.zeros((args.epochs, len(train_loader)))
@@ -238,6 +251,8 @@ def main():
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
+    parser.add_argument('--loss', default='ce', choices=['ce', 'dice', 'cedice', 'focal'],
+                        help="Loss function to use for training")
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
 
