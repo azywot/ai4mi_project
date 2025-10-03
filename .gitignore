@@ -24,3 +24,17 @@ train_results/*/*
 !train_results/*/bestmodel.pkl
 !train_results/*/dice_*.npy
 !train_results/*/loss_*.npy
+
+adamW/*/*
+ground_truth/
+stitched_predictions/
+# Unignore the best epoch and metric files
+!adamW/*/best_epoch/
+!adamW/*/best_epoch.txt
+!adamW/*/dice_*.npy
+!adamW/*/loss_*.npy
+!adamW/*/3d_*.npy
+
+wandb/
+
+distorch/

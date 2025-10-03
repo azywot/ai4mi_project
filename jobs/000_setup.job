@@ -12,7 +12,7 @@ module load 2023
 module load Anaconda3/2023.07-2
 
 # Change to your project directory
-cd $HOME/ai4mi_project/
+cd $HOME/group_project/ai4mi_project/
 
 # Remove existing virtual environment if it exists
 if [ -d "ai4mi" ]; then
@@ -32,8 +32,21 @@ which python
 echo "Python version:"
 python --version
 
+# Install uv for package management
+python -m pip install uv
+
 # Install dependencies from requirements.txt
-python -m pip install -r requirements.txt
+uv pip install -r requirements.txt
+
+# Prepare the data
+make data/SEGTHOR_CLEAN CFLAGS=-O -n  # Will display the commands that will run, easy to inspect:
+rm -rf data/segthor_fixed_tmp data/segthor_fixed
+python -O sabotage.py --mode inv --source_dir data/segthor_train --dest_dir data/segthor_fixed_tmp -K 2 --regex_gt "GT.nii.gz" -p 4
+mv data/segthor_fixed_tmp data/segthor_fixed
+rm -rf data/SEGTHOR_CLEAN_tmp data/SEGTHOR_CLEAN
+python -O slice_segthor.py --source_dir data/segthor_fixed --dest_dir data/SEGTHOR_CLEAN_tmp \
+        --shape 256 256 --retain 10 -p -1
+mv data/SEGTHOR_CLEAN_tmp data/SEGTHOR_CLEAN
 
 # Echo a message upon successful completion
 echo "Job completed successfully."

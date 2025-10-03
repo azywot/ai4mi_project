@@ -160,12 +160,12 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     net.to(device)
 
     lr = 0.0005
-    optimizer = torch.optim.Adam(net.parameters(), lr=lr, betas=(0.9, 0.999))
+    optimizer = torch.optim.AdamW(net.parameters(), lr=lr, betas=(0.9, 0.999))
     
     # Log model architecture and hyperparameters to wandb
     wandb.config.update({
         "learning_rate": lr,
-        "optimizer": "Adam",
+        "optimizer": "AdamW",
         "betas": (0.9, 0.999),
         "num_classes": K,
         "kernels": kernels,

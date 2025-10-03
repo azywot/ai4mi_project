@@ -6,3 +6,5 @@ tqdm
 pillow
 scikit-image
 matplotlib
+wandb
+python-dotenv
