@@ -11,3 +11,16 @@ out/
 # jobs/
 results_old/
 student-15704939
+.env
+outfiles/
+
+
+# Ignore everything inside those subdirectories
+train_results/*/*
+
+# Now specifically un-ignore what we want to keep
+!train_results/*/best_epoch/
+!train_results/*/best_epoch.txt
+!train_results/*/bestmodel.pkl
+!train_results/*/dice_*.npy
+!train_results/*/loss_*.npy
