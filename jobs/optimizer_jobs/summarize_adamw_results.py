@@ -133,7 +133,7 @@ def main():
                        default="train_results/adamW/comparison_with_baseline.csv",
                        help="Output CSV file for comparison with baseline")
     parser.add_argument("--baseline_file",
-                       default="train_results/per_class_stats.csv",
+                       default="train_results/baseline_per_class_stats.csv",
                        help="Baseline per-class stats file")
     parser.add_argument("--seeds", 
                        nargs="+", 
@@ -157,7 +157,7 @@ def main():
         seed_dir = results_dir / f"train_results_baseline_{seed}"
         
         # Try evaluation_results location first
-        eval_metrics_dir = Path("evaluation_results/adamW/metrics") / f"seed_{seed}"
+        eval_metrics_dir = Path("/home/scur1622/group_project/ai4mi_project/evaluation_results/adamW/metrics") / f"seed_{seed}"
         
         metrics_dir = None
         if eval_metrics_dir.exists():
