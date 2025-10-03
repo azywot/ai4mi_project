@@ -8,3 +8,4 @@ scikit-image
 matplotlib
 wandb
 python-dotenv
+sam-pytorch
