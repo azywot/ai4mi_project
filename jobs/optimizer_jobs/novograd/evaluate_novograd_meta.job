@@ -1,0 +1,50 @@
+#!/bin/bash
+#SBATCH --partition=staging
+#SBATCH --job-name=novograd_meta
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=8GB
+#SBATCH --time=00:30:00
+#SBATCH --output=out/novograd_meta.log
+
+# Change to your project directory
+cd $HOME/group_project/ai4mi_project/
+
+# Define seeds to evaluate
+SEEDS=(42 420 37)
+echo "=========================================="
+echo "Novograd Optimizer - Meta Job Submission"
+echo "=========================================="
+echo "Submitting jobs for seeds: ${SEEDS[@]}"
+echo "=========================================="
+
+# Submit individual jobs for each seed
+for seed in "${SEEDS[@]}"; do
+    echo "Submitting job for seed ${seed}..."
+    
+    # Submit the single seed job with SEED environment variable
+    sbatch \
+    --export=ALL,SEED=${seed} \
+    --output=out/results/novograd_seed_${seed}.log \
+    jobs/optimizer_jobs/novograd/evaluate_novograd_single_seed.job
+    
+    if [ $? -eq 0 ]; then
+        echo "✓ Job submitted successfully for seed ${seed}"
+    else
+        echo "✗ Failed to submit job for seed ${seed}"
+    fi
+done
+
+echo ""
+echo "=========================================="
+echo "Meta Job Summary"
+echo "=========================================="
+echo "All jobs submitted for seeds: ${SEEDS[@]}"
+echo "Check job status with: squeue -u $USER"
+echo "Monitor individual job outputs in: out/results/novograd_seed_*.log"
+echo "=========================================="
+
+echo ""
+echo "Meta job completed - individual seed jobs are now running in parallel!"
+
+

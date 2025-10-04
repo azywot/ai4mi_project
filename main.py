@@ -40,6 +40,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 import wandb
 from sam import SAM
+from monai.optimizers import Novograd, WarmupCosineSchedule, generate_param_groups
 
 # Load environment variables from .env file
 try:
@@ -114,7 +115,7 @@ def gt_transform(K, img):
         img = class2one_hot(img, K=K)
         return img[0]
 
-def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
+def setup(args) -> tuple[nn.Module, Any, Any, Any, DataLoader, DataLoader, int]:
     # Initialize wandb
     wandb_mode = "offline" if args.wandb_offline else "online"
     
@@ -160,48 +161,10 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     net.init_weights()
     net.to(device)
 
-    # Initialize optimizer based on args with appropriate learning rates
-    if args.optimizer == "adamw":
-        lr = 0.0005
-        optimizer = torch.optim.AdamW(net.parameters(), lr=lr, betas=(0.9, 0.999))
-        optimizer_config = {
-            "optimizer": "AdamW",
-            "betas": (0.9, 0.999),
-        }
-    elif args.optimizer == "sam":
-        lr = 0.01  # SAM with SGD needs higher LR than AdamW
-        base_optimizer = torch.optim.SGD
-        optimizer = SAM(net.parameters(), base_optimizer, lr=lr, momentum=0.9, rho=0.05)
-        optimizer_config = {
-            "optimizer": "SAM",
-            "base_optimizer": "SGD",
-            "momentum": 0.9,
-            "rho": 0.05,
-        }
-    else:
-        raise ValueError(f"Unknown optimizer: {args.optimizer}")
-    
-    # Log model architecture and hyperparameters to wandb
-    wandb.config.update({
-        "learning_rate": lr,
-        **optimizer_config,
-        "num_classes": K,
-        "kernels": kernels,
-        "factor": factor,
-        "batch_size": datasets_params[args.dataset]['B'],
-        "num_workers": 5,
-        "seed": args.seed
-    })
-    
-    # Log model architecture (commented out due to pickle issues with wandb.watch)
-    # wandb.watch(net, log="all", log_freq=10)
-
     # Dataset part
     B: int = datasets_params[args.dataset]['B']
     root_dir = Path("data") / args.dataset
-
-
-
+    
     train_set = SliceDataset('train',
                              root_dir,
                              img_transform=img_transform,
@@ -221,15 +184,95 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
                             batch_size=B,
                             num_workers=5,
                             shuffle=False)
+    
+    # Initialize optimizer based on args with appropriate learning rates
+    if args.optimizer == "adamw":
+        lr = 0.0005
+        optimizer = torch.optim.AdamW(net.parameters(), lr=lr, betas=(0.9, 0.999))
+        optimizer_config = {
+            "optimizer": "AdamW",
+            "betas": (0.9, 0.999),
+        }
+    elif args.optimizer == "sam":
+        lr = 0.01  # SAM with SGD needs higher LR than AdamW
+        base_optimizer = torch.optim.SGD
+        optimizer = SAM(net.parameters(), base_optimizer, lr=lr, momentum=0.9, rho=0.05)
+        optimizer_config = {
+            "optimizer": "SAM",
+            "base_optimizer": "SGD",
+            "momentum": 0.9,
+            "rho": 0.05,
+        }
+    elif args.optimizer == "novograd":
+        lr = 0.001  # Conservative LR for Novograd
+        
+        # Simple Novograd configuration - no layer-wise LR
+        optimizer = Novograd(
+            net.parameters(), 
+            lr=lr, 
+            betas=(0.9, 0.98),  # Standard betas
+            weight_decay=0.001,  # Standard weight decay
+            grad_averaging=False  # Disable gradient averaging for simplicity
+        )
+        optimizer_config = {
+            "optimizer": "Novograd",
+            "betas": (0.9, 0.98),
+            "weight_decay": 0.001,
+            "grad_averaging": False,
+        }
+    else:
+        raise ValueError(f"Unknown optimizer: {args.optimizer}")
+    
+    # LearningRateFinder removed per project simplification
+    
+    # Create learning rate scheduler
+    scheduler = None
+    if args.use_scheduler:
+        total_steps = args.epochs * len(train_loader)
+        warmup_pct = 0.1
+        warmup_steps = int(warmup_pct * total_steps)
+        scheduler = WarmupCosineSchedule(
+            optimizer,
+            warmup_steps=warmup_steps,
+            t_total=total_steps,
+            cycles=0.5,
+            last_epoch=-1,
+        )
+        print(f">> Using WarmupCosineSchedule: warmup_steps={warmup_steps} (10%), total_steps={total_steps}")
+    
+    # Log model architecture and hyperparameters to wandb
+    wandb_config = {
+        "learning_rate": lr,
+        **optimizer_config,
+        "num_classes": K,
+        "kernels": kernels,
+        "factor": factor,
+        "batch_size": B,
+        "num_workers": 5,
+        "seed": args.seed,
+        "use_scheduler": args.use_scheduler,
+        # LR finder disabled
+        "use_layer_wise_lr": args.use_layer_wise_lr,
+        "grad_clip": args.grad_clip,
+    }
+    if scheduler is not None:
+        wandb_config["scheduler"] = "WarmupCosineSchedule"
+        wandb_config["warmup_steps"] = warmup_steps
+        wandb_config["total_steps"] = total_steps
+    
+    wandb.config.update(wandb_config)
+    
+    # Log model architecture (commented out due to pickle issues with wandb.watch)
+    # wandb.watch(net, log="all", log_freq=10)
 
     args.dest.mkdir(parents=True, exist_ok=True)
 
-    return (net, optimizer, device, train_loader, val_loader, K)
+    return (net, optimizer, scheduler, device, train_loader, val_loader, K)
 
 
 def runTraining(args):
     print(f">>> Setting up to train on {args.dataset} with {args.mode} using {args.optimizer} optimizer")
-    net, optimizer, device, train_loader, val_loader, K = setup(args)
+    net, optimizer, scheduler, device, train_loader, val_loader, K = setup(args)
 
     if args.mode == "full":
         loss_fn = CrossEntropy(idk=list(range(K)))  # Supervise both background and foreground
@@ -293,6 +336,10 @@ def runTraining(args):
                     if opt:  # Only for training
                         loss.backward()
                         
+                        # Gradient clipping for stability (especially important for Novograd)
+                        if args.grad_clip > 0:
+                            torch.nn.utils.clip_grad_norm_(net.parameters(), args.grad_clip)
+                        
                         # SAM optimizer requires two-step optimization
                         if isinstance(opt, SAM):
                             opt.first_step(zero_grad=True)
@@ -302,9 +349,18 @@ def runTraining(args):
                             pred_probs_2 = F.softmax(1 * pred_logits_2, dim=1)
                             loss_2 = loss_fn(pred_probs_2, gt)
                             loss_2.backward()
+                            
+                            # Gradient clipping for second pass too
+                            if args.grad_clip > 0:
+                                torch.nn.utils.clip_grad_norm_(net.parameters(), args.grad_clip)
+                            
                             opt.second_step(zero_grad=True)
                         else:
                             opt.step()
+                        
+                        # Update learning rate scheduler if present
+                        if scheduler is not None:
+                            scheduler.step()
 
                     if m == 'val':
                         with warnings.catch_warnings():
@@ -336,13 +392,17 @@ def runTraining(args):
         train_dice_epoch = log_dice_tra[e, :, 1:].mean().item()  # Exclude background class
         val_dice_epoch = log_dice_val[e, :, 1:].mean().item()   # Exclude background class
         
+        # Get current learning rate
+        current_lr = optimizer.param_groups[0]['lr']
+        
         # Log per-class dice scores
         wandb_log = {
             "epoch": e,
             "train_loss": train_loss_epoch,
             "val_loss": val_loss_epoch,
             "train_dice": train_dice_epoch,
-            "val_dice": val_dice_epoch
+            "val_dice": val_dice_epoch,
+            "learning_rate": current_lr
         }
         
         # Add per-class dice scores
@@ -430,8 +490,14 @@ def main():
                         help="Custom name for wandb experiment run")
     parser.add_argument('--seed', type=int, default=42,
                         help="Random seed for reproducibility (default: 42)")
-    parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sam'],
+    parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sam', 'novograd'],
                         help="Optimizer to use for training (default: adamw)")
+    parser.add_argument('--use_scheduler', action='store_true',
+                        help="Use WarmupCosineSchedule learning rate scheduler")
+    parser.add_argument('--use_layer_wise_lr', action='store_true',
+                        help="Use layer-wise learning rates (different LRs for encoder/decoder) - only for Novograd")
+    parser.add_argument('--grad_clip', type=float, default=1.0,
+                        help="Gradient clipping max norm (0 to disable, default: 1.0)")
 
     args = parser.parse_args()
 

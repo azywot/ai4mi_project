@@ -109,17 +109,24 @@ def compare_with_baseline(optimizer_df, baseline_file):
                 optimizer_mean = optimizer_row[col]
                 baseline_mean = baseline_row[col]
                 
-                # Calculate improvement
-                improvement = optimizer_mean - baseline_mean
-                improvement_pct = (improvement / baseline_mean * 100) if baseline_mean != 0 else 0
+                # Handle NaN values
+                if np.isnan(optimizer_mean) or np.isnan(baseline_mean):
+                    comp_row[f'{metric_name}_optimizer'] = optimizer_mean
+                    comp_row[f'{metric_name}_baseline'] = baseline_mean
+                    comp_row[f'{metric_name}_diff'] = np.nan
+                    comp_row[f'{metric_name}_diff_pct'] = "nan%"
+                else:
+                    # Calculate improvement
+                    improvement = optimizer_mean - baseline_mean
+                    improvement_pct = (improvement / baseline_mean * 100) if baseline_mean != 0 else 0
 
-                # Conver to text with % sign
-                improvement_pct = f"{improvement_pct:.2f}%"
-                
-                comp_row[f'{metric_name}_optimizer'] = optimizer_mean
-                comp_row[f'{metric_name}_baseline'] = baseline_mean
-                comp_row[f'{metric_name}_diff'] = improvement
-                comp_row[f'{metric_name}_diff_pct'] = improvement_pct
+                    # Convert to text with % sign
+                    improvement_pct = f"{improvement_pct:.2f}%"
+                    
+                    comp_row[f'{metric_name}_optimizer'] = optimizer_mean
+                    comp_row[f'{metric_name}_baseline'] = baseline_mean
+                    comp_row[f'{metric_name}_diff'] = improvement
+                    comp_row[f'{metric_name}_diff_pct'] = improvement_pct
         
         comparison.append(comp_row)
     
