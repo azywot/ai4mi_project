@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Summary script to compare AdamW results across all seeds.
+Script to summarize optimizer results across multiple seeds.
 This script reads the metrics computed for each seed and creates a per-class summary.
 Each class shows mean ± std computed across all seeds.
+Usage: python summarize_optimizer_results.py --optimizer <optimizer_name>
 """
 
 import os
-import pandas as pd
 import numpy as np
 from pathlib import Path
+import pandas as pd
 import argparse
 
 def load_metrics_from_npy(metrics_dir):
@@ -84,8 +85,8 @@ def compute_per_class_stats(all_seed_metrics):
     
     return pd.DataFrame(results)
 
-def compare_with_baseline(adamw_df, baseline_file):
-    """Compare AdamW per-class results with baseline per-class results."""
+def compare_with_baseline(optimizer_df, baseline_file):
+    """Compare optimizer per-class results with baseline per-class results."""
     if not Path(baseline_file).exists():
         print(f"Warning: Baseline file {baseline_file} not found")
         return None
@@ -95,24 +96,27 @@ def compare_with_baseline(adamw_df, baseline_file):
     # Create comparison DataFrame
     comparison = []
     
-    for class_idx in adamw_df['class']:
-        adamw_row = adamw_df[adamw_df['class'] == class_idx].iloc[0]
+    for class_idx in optimizer_df['class']:
+        optimizer_row = optimizer_df[optimizer_df['class'] == class_idx].iloc[0]
         baseline_row = baseline_df[baseline_df['class'] == class_idx].iloc[0]
         
         comp_row = {'class': class_idx}
         
         # Compare each metric
-        for col in adamw_df.columns:
+        for col in optimizer_df.columns:
             if col != 'class' and '_mean' in col:
                 metric_name = col.replace('_mean', '')
-                adamw_mean = adamw_row[col]
+                optimizer_mean = optimizer_row[col]
                 baseline_mean = baseline_row[col]
                 
                 # Calculate improvement
-                improvement = adamw_mean - baseline_mean
+                improvement = optimizer_mean - baseline_mean
                 improvement_pct = (improvement / baseline_mean * 100) if baseline_mean != 0 else 0
+
+                # Conver to text with % sign
+                improvement_pct = f"{improvement_pct:.2f}%"
                 
-                comp_row[f'{metric_name}_adamw'] = adamw_mean
+                comp_row[f'{metric_name}_optimizer'] = optimizer_mean
                 comp_row[f'{metric_name}_baseline'] = baseline_mean
                 comp_row[f'{metric_name}_diff'] = improvement
                 comp_row[f'{metric_name}_diff_pct'] = improvement_pct
@@ -122,18 +126,21 @@ def compare_with_baseline(adamw_df, baseline_file):
     return pd.DataFrame(comparison)
 
 def main():
-    parser = argparse.ArgumentParser(description="Summarize AdamW results across seeds")
+    parser = argparse.ArgumentParser(description="Summarize optimizer results across seeds")
+    parser.add_argument("--optimizer",
+                       required=True,
+                       help="Optimizer name (e.g., sam, adamw, sgd)")
     parser.add_argument("--results_dir", 
-                       default="train_results/adamW", 
-                       help="Directory containing training results (train_results/adamW)")
+                       default=None, 
+                       help="Directory containing training results (default: train_results/<optimizer>)")
     parser.add_argument("--output_file", 
-                       default="train_results/adamW/per_class_stats.csv", 
-                       help="Output CSV file for per-class summary")
+                       default=None, 
+                       help="Output CSV file for per-class summary (default: evaluation_results/<optimizer>/per_class_stats.csv)")
     parser.add_argument("--comparison_file",
-                       default="train_results/adamW/comparison_with_baseline.csv",
-                       help="Output CSV file for comparison with baseline")
+                       default=None,
+                       help="Output CSV file for comparison with baseline (default: evaluation_results/<optimizer>/comparison_with_baseline.csv)")
     parser.add_argument("--baseline_file",
-                       default="train_results/baseline_per_class_stats.csv",
+                       default="/home/scur1622/group_project/ai4mi_project/train_results/baseline_per_class_stats.csv",
                        help="Baseline per-class stats file")
     parser.add_argument("--seeds", 
                        nargs="+", 
@@ -143,27 +150,36 @@ def main():
     
     args = parser.parse_args()
     
-    results_dir = Path(args.results_dir)
+    optimizer = args.optimizer
     seeds = args.seeds
     
+    # Set default paths based on optimizer name
+    if args.results_dir is None:
+        args.results_dir = f"/home/scur1622/group_project/ai4mi_project/train_results/{optimizer}"
+    if args.output_file is None:
+        args.output_file = f"/home/scur1622/group_project/ai4mi_project/evaluation_results/{optimizer}/per_class_stats.csv"
+    if args.comparison_file is None:
+        args.comparison_file = f"/home/scur1622/group_project/ai4mi_project/evaluation_results/{optimizer}/comparison_with_baseline.csv"
+    
+    print("="*60)
+    print(f"{optimizer.upper()} Optimizer - Results Summary")
+    print("="*60)
     print(f"Summarizing results for seeds: {seeds}")
-    print(f"Results directory: {results_dir}")
     
     # Collect metrics for each seed
     all_seed_metrics = {}
     
     for seed in seeds:
-        # Look for metrics in train_results/adamW/train_results_baseline_{seed}/...
-        seed_dir = results_dir / f"train_results_baseline_{seed}"
-        
-        # Try evaluation_results location first
-        eval_metrics_dir = Path("/home/scur1622/group_project/ai4mi_project/evaluation_results/adamW/metrics") / f"seed_{seed}"
+        # Look for metrics in evaluation_results location
+        eval_metrics_dir = Path(f"/home/scur1622/group_project/ai4mi_project/evaluation_results/{optimizer}/metrics") / f"seed_{seed}"
         
         metrics_dir = None
         if eval_metrics_dir.exists():
             metrics_dir = eval_metrics_dir
-        elif seed_dir.exists():
-            # Look for metrics in subdirectories
+        else:
+            # Try training results directory
+            results_dir = Path(args.results_dir)
+            seed_dir = results_dir / f"train_results_baseline_{seed}"
             possible_paths = [
                 seed_dir / "metrics",
                 seed_dir / "best_epoch" / "metrics",
@@ -176,7 +192,6 @@ def main():
         if metrics_dir is None:
             print(f"\nWarning: Could not find metrics directory for seed {seed}")
             print(f"  Tried: {eval_metrics_dir}")
-            print(f"  Tried: {seed_dir}")
             continue
         
         print(f"\nProcessing seed {seed} from {metrics_dir}")
@@ -209,7 +224,7 @@ def main():
     per_class_df.to_csv(output_file, index=False)
     
     print(f"\nPer-class statistics saved to: {output_file}")
-    print("\nAdamW Per-Class Results (mean ± std over seeds):")
+    print(f"\n{optimizer.upper()} Per-Class Results (mean ± std over seeds):")
     print("="*60)
     print(per_class_df.to_string(index=False, float_format='%.6f'))
     
@@ -227,6 +242,11 @@ def main():
         print("\nPer-Class Comparison with Baseline:")
         print("="*60)
         print(comparison_df.to_string(index=False, float_format='%.4f'))
+    
+    print("\n" + "="*60)
+    print("Summary Complete")
+    print("="*60)
 
 if __name__ == "__main__":
     main()
+

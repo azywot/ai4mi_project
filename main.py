@@ -39,6 +39,7 @@ from torch import nn, Tensor
 from torchvision import transforms
 from torch.utils.data import DataLoader
 import wandb
+from sam import SAM
 
 # Load environment variables from .env file
 try:
@@ -159,14 +160,31 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     net.init_weights()
     net.to(device)
 
-    lr = 0.0005
-    optimizer = torch.optim.AdamW(net.parameters(), lr=lr, betas=(0.9, 0.999))
+    # Initialize optimizer based on args with appropriate learning rates
+    if args.optimizer == "adamw":
+        lr = 0.0005
+        optimizer = torch.optim.AdamW(net.parameters(), lr=lr, betas=(0.9, 0.999))
+        optimizer_config = {
+            "optimizer": "AdamW",
+            "betas": (0.9, 0.999),
+        }
+    elif args.optimizer == "sam":
+        lr = 0.01  # SAM with SGD needs higher LR than AdamW
+        base_optimizer = torch.optim.SGD
+        optimizer = SAM(net.parameters(), base_optimizer, lr=lr, momentum=0.9, rho=0.05)
+        optimizer_config = {
+            "optimizer": "SAM",
+            "base_optimizer": "SGD",
+            "momentum": 0.9,
+            "rho": 0.05,
+        }
+    else:
+        raise ValueError(f"Unknown optimizer: {args.optimizer}")
     
     # Log model architecture and hyperparameters to wandb
     wandb.config.update({
         "learning_rate": lr,
-        "optimizer": "AdamW",
-        "betas": (0.9, 0.999),
+        **optimizer_config,
         "num_classes": K,
         "kernels": kernels,
         "factor": factor,
@@ -210,7 +228,7 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
 
 
 def runTraining(args):
-    print(f">>> Setting up to train on {args.dataset} with {args.mode}")
+    print(f">>> Setting up to train on {args.dataset} with {args.mode} using {args.optimizer} optimizer")
     net, optimizer, device, train_loader, val_loader, K = setup(args)
 
     if args.mode == "full":
@@ -274,7 +292,19 @@ def runTraining(args):
 
                     if opt:  # Only for training
                         loss.backward()
-                        opt.step()
+                        
+                        # SAM optimizer requires two-step optimization
+                        if isinstance(opt, SAM):
+                            opt.first_step(zero_grad=True)
+                            
+                            # Second forward-backward pass
+                            pred_logits_2 = net(img)
+                            pred_probs_2 = F.softmax(1 * pred_logits_2, dim=1)
+                            loss_2 = loss_fn(pred_probs_2, gt)
+                            loss_2.backward()
+                            opt.second_step(zero_grad=True)
+                        else:
+                            opt.step()
 
                     if m == 'val':
                         with warnings.catch_warnings():
@@ -400,6 +430,8 @@ def main():
                         help="Custom name for wandb experiment run")
     parser.add_argument('--seed', type=int, default=42,
                         help="Random seed for reproducibility (default: 42)")
+    parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sam'],
+                        help="Optimizer to use for training (default: adamw)")
 
     args = parser.parse_args()
 
