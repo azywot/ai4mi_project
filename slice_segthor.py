@@ -37,7 +37,8 @@ from skimage.io import imsave
 from skimage.transform import resize
 
 from utils import map_, tqdm_
-import preprocessing
+from preprocessing import apply_hu_window, zscore_normalize, get_body_mask, crop_to_body, resample_inplane
+
 
 
 def norm_arr(img: np.ndarray) -> np.ndarray:
@@ -107,23 +108,23 @@ def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int
         gt = np.zeros_like(ct, dtype=np.uint8)
 
     if use_preprocessing:
-        # Optional: crop to body bbox to reduce background (can comment out first run)
-        ct_hu = preprocessing.hu_window(ct, -100, 400)  # still HU
-        y1, y2, x1, x2 = preprocessing.compute_body_bbox_from_hu(ct_hu, hu_thresh=-600, margin=16)
-        ct_cropped = ct[y1:y2, x1:x2, :]
-        gt_cropped = gt[y1:y2, x1:x2, :] if not test_mode else gt
+        # --- HU window wider to include trachea + soft tissue
+        ct = apply_hu_window(ct, -1000, 1000)
 
-        # In-plane resample ONLY + HU clip + min–max (CT), and NN resample for GT
-        ct = preprocessing.preprocess_ct_inplane_only(
-            ct_cropped, spacing_yxz=spacing_yxz, hu_min=-100, hu_max=400, target_xy=1.0, do_resample=True
-        )
+        mask = get_body_mask(ct)
+        ct = crop_to_body(ct, mask, margin=10)
+        gt = crop_to_body(gt, mask, margin=10) if not test_mode else gt
+
+        ct = zscore_normalize(ct)
+
+        ct = resample_inplane(ct, new_spacing=(1.0, 1.0), spacing=spacing_yxz, is_label=False)
         if not test_mode:
-            gt = preprocessing.preprocess_label_inplane_only(
-                gt_cropped, spacing_yxz=spacing_yxz, target_xy=1.0, do_resample=True
-            )
+            gt = resample_inplane(gt, new_spacing=(1.0, 1.0), spacing=spacing_yxz, is_label=True)
 
-        # Convert [0,1] → [0,255] for PNGs
-        norm_ct = (ct * 255.0).astype(np.uint8)
+        # --- Convert to uint8 for PNG storage (scale to 0–255)
+        norm_ct = np.clip((ct - ct.min()) / (ct.max() - ct.min() + 1e-8), 0, 1)
+        norm_ct = (norm_ct * 255.0).astype(np.uint8)
+
     else:
         # Baseline path unchanged
         norm_ct = norm_arr(ct)
@@ -237,8 +238,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--process', '-p', type=int, default=1,
                         help="The number of cores to use for processing")
     parser.add_argument("--use_preprocessing", action="store_true",
-    help="Preprocess: in-plane resample to 1mm (keep z), HU clip [-100,400], min–max to [0,1]")
-
+    help="Preprocess: HU clip [-1000,1000], Otsu body cropping, z-score normalization, in-plane resample to 1mm")
     
     args = parser.parse_args()
     random.seed(args.seed)
