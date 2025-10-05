@@ -62,7 +62,11 @@ from utils import (Dcm,
                    dice_coef,
                    save_images)
 
-from losses import (CrossEntropy, DiceLoss, CEDiceLoss, FocalCrossEntropy)
+from losses import (CrossEntropy, DiceLoss, CEDiceLoss, FocalCrossEntropy,
+                    GeneralizedDiceLoss, TverskyLoss, DiceFocalLoss,
+                    MonaiDiceLossWrapper, MonaiGeneralizedDiceLossWrapper,
+                    MonaiTverskyLossWrapper, MonaiDiceCELossWrapper,
+                    MonaiFocalLossWrapper, MonaiHausdorffDTLossWrapper)
 
 
 def set_random_seed(seed: int = 42) -> None:
@@ -94,6 +98,7 @@ datasets_params: dict[str, dict[str, Any]] = {}
 datasets_params["TOY2"] = {'K': 2, 'net': shallowCNN, 'B': 2, 'kernels': 8, 'factor': 2}
 datasets_params["SEGTHOR"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 datasets_params["SEGTHOR_CLEAN"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
+datasets_params["SEGTHOR_CLEAN_v2"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 
 def img_transform(img):
         img = img.convert('L')
@@ -230,6 +235,24 @@ def runTraining(args):
         loss_fn = CEDiceLoss(idk=idk)
     elif args.loss == 'focal':
         loss_fn = FocalCrossEntropy(idk=idk)
+    elif args.loss == 'gdl':
+        loss_fn = GeneralizedDiceLoss(idk=idk)
+    elif args.loss == 'tversky':
+        loss_fn = TverskyLoss(idk=idk)
+    elif args.loss == 'dicefocal':
+        loss_fn = DiceFocalLoss(idk=idk)
+    elif args.loss == 'monai_dice':
+        loss_fn = MonaiDiceLossWrapper(idk=idk)
+    elif args.loss == 'monai_gdl':
+        loss_fn = MonaiGeneralizedDiceLossWrapper(idk=idk)
+    elif args.loss == 'monai_tversky':
+        loss_fn = MonaiTverskyLossWrapper(idk=idk)
+    elif args.loss == 'monai_dicece':
+        loss_fn = MonaiDiceCELossWrapper(idk=idk)
+    elif args.loss == 'monai_focal':
+        loss_fn = MonaiFocalLossWrapper(idk=idk)
+    elif args.loss == 'monai_hausdorffdt':
+        loss_fn = MonaiHausdorffDTLossWrapper(idk=idk)
     else:
         raise ValueError(f"Unknown loss: {args.loss}")
 
@@ -294,9 +317,11 @@ def runTraining(args):
                             warnings.filterwarnings('ignore', category=UserWarning)
                             predicted_class: Tensor = probs2class(pred_probs)
                             mult: int = 63 if K == 5 else (255 / (K - 1))
+                            # Decide per-epoch save dir (temporary if save_best_only)
+                            base_iter_dir = (args.dest / "_tmp" / f"iter{e:03d}") if args.save_best_only else (args.dest / f"iter{e:03d}")
                             save_images(predicted_class * mult,
                                         data['stems'],
-                                        args.dest / f"iter{e:03d}" / m)
+                                        base_iter_dir / m)
 
                     j += B  # Keep in mind that _in theory_, each batch might have a different size
                     # For the DSC average: do not take the background class (0) into account:
@@ -350,7 +375,10 @@ def runTraining(args):
             best_folder = args.dest / "best_epoch"
             if best_folder.exists():
                 rmtree(best_folder)
-            copytree(args.dest / f"iter{e:03d}", Path(best_folder))
+            # Source depends on whether we saved only to temporary folder
+            src_iter_dir = (args.dest / "_tmp" / f"iter{e:03d}") if args.save_best_only else (args.dest / f"iter{e:03d}")
+            if src_iter_dir.exists():
+                copytree(src_iter_dir, Path(best_folder))
 
             torch.save(net, args.dest / "bestmodel.pkl")
             torch.save(net.state_dict(), args.dest / "bestweights.pt")
@@ -359,6 +387,16 @@ def runTraining(args):
             wandb.save(str(args.dest / "bestmodel.pkl"))
             wandb.save(str(args.dest / "bestweights.pt"))
     
+        # Cleanup temporary per-epoch images if not best and saving best only
+        if args.save_best_only:
+            tmp_dir = args.dest / "_tmp" / f"iter{e:03d}"
+            if tmp_dir.exists() and (current_dice <= best_dice):
+                try:
+                    rmtree(tmp_dir)
+                except Exception:
+                    print(f">> Warning: Failed to remove temporary directory {tmp_dir}")
+                    pass
+
     # Final logging and artifact saving
     print(f">>> Training completed. Best dice: {best_dice:.3f}")
     wandb.log({"final_best_dice": best_dice}, step=args.epochs-1)
@@ -396,7 +434,9 @@ def main():
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
-    parser.add_argument('--loss', default='ce', choices=['ce', 'dice', 'cedice', 'focal'],
+    parser.add_argument('--loss', default='ce', choices=['ce', 'dice', 'cedice', 'focal', 'gdl', 'tversky', 'dicefocal',
+                                                         'monai_dice', 'monai_gdl', 'monai_tversky', 'monai_dicece', 'monai_focal',
+                                                         'monai_hausdorffdt'],
                         help="Loss function to use for training")
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
@@ -415,6 +455,8 @@ def main():
                         help="Custom name for wandb experiment run")
     parser.add_argument('--seed', type=int, default=42,
                         help="Random seed for reproducibility (default: 42)")
+    parser.add_argument('--save_best_only', action='store_true',
+                        help="If set, only store images for best_epoch; intermediate epoch images are temporary")
 
     args = parser.parse_args()
 
