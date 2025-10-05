@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8GB
 #SBATCH --time=00:30:00
-#SBATCH --output=out/novograd_meta.log
+#SBATCH --output=/home/scur1622/group_project/ai4mi_project/out/novograd_meta.log
 
 # Change to your project directory
 cd $HOME/group_project/ai4mi_project/

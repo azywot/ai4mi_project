@@ -51,7 +51,7 @@ python -O main.py \
   --optimizer novograd \
   --use_scheduler \
   --grad_clip 0.5 \
-  --wandb_name "novograd_simple_seed_${SEED}"
+  --wandb_name "novograd_seed_${SEED}"
 
 if [ $? -eq 0 ]; then
     echo "✓ Training completed for seed ${SEED}"

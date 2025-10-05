@@ -204,41 +204,89 @@ def setup(args) -> tuple[nn.Module, Any, Any, Any, DataLoader, DataLoader, int]:
             "rho": 0.05,
         }
     elif args.optimizer == "novograd":
-        lr = 0.001  # Conservative LR for Novograd
+        lr = 0.001  # Base learning rate for Novograd
         
-        # Simple Novograd configuration - no layer-wise LR
-        optimizer = Novograd(
-            net.parameters(), 
-            lr=lr, 
-            betas=(0.9, 0.98),  # Standard betas
-            weight_decay=0.001,  # Standard weight decay
-            grad_averaging=False  # Disable gradient averaging for simplicity
-        )
-        optimizer_config = {
-            "optimizer": "Novograd",
-            "betas": (0.9, 0.98),
-            "weight_decay": 0.001,
-            "grad_averaging": False,
-        }
+        if args.use_layer_wise_lr:
+            # Use layer-wise learning rates as recommended in MONAI docs
+            # Different learning rates for encoder and decoder parts
+            print(">> Using layer-wise learning rates for Novograd")
+            
+            # Create parameter groups with different learning rates
+            # For ENet: initial layers, encoder layers, decoder layers
+            param_groups = generate_param_groups(
+                network=net,
+                layer_matches=[
+                    # Initial layers: conv0, maxpool0, bottleneck1_0
+                    lambda x: nn.ModuleList([x.conv0, x.maxpool0, x.bottleneck1_0]) if hasattr(x, 'conv0') else nn.ModuleList(),
+                    # Encoder layers: bottleneck1_1, bottleneck2_0, bottleneck2_1, bottleneck3
+                    lambda x: nn.ModuleList([x.bottleneck1_1, x.bottleneck2_0, x.bottleneck2_1, x.bottleneck3]) if hasattr(x, 'bottleneck1_1') else nn.ModuleList(),
+                ],
+                match_types=["select", "select"],
+                lr_values=[lr * 0.5, lr * 0.75],  # Lower LR for early layers
+                include_others=True  # Include decoder/output with base LR
+            )
+            
+            optimizer = Novograd(
+                param_groups,
+                lr=lr,  # Base LR for remaining layers
+                betas=(0.9, 0.98),
+                weight_decay=0.001,
+                grad_averaging=False,
+                amsgrad=False
+            )
+            optimizer_config = {
+                "optimizer": "Novograd",
+                "betas": (0.9, 0.98),
+                "weight_decay": 0.001,
+                "grad_averaging": False,
+                "amsgrad": False,
+                "layer_wise_lr": True,
+                "lr_initial": lr * 0.5,
+                "lr_encoder": lr * 0.75,
+                "lr_decoder": lr,  # Base LR for decoder/remaining layers
+            }
+        else:
+            # Simple Novograd configuration without layer-wise LR
+            optimizer = Novograd(
+                net.parameters(),
+                lr=lr,
+                betas=(0.9, 0.98),
+                weight_decay=0.001,
+                grad_averaging=False,
+                amsgrad=False
+            )
+            optimizer_config = {
+                "optimizer": "Novograd",
+                "betas": (0.9, 0.98),
+                "weight_decay": 0.001,
+                "grad_averaging": False,
+                "amsgrad": False,
+                "layer_wise_lr": False,
+            }
     else:
         raise ValueError(f"Unknown optimizer: {args.optimizer}")
     
     # LearningRateFinder removed per project simplification
     
-    # Create learning rate scheduler
+    # Create learning rate scheduler (compatible with all optimizers)
     scheduler = None
     if args.use_scheduler:
         total_steps = args.epochs * len(train_loader)
         warmup_pct = 0.1
         warmup_steps = int(warmup_pct * total_steps)
+        end_lr = lr * 0.01  # End at 1% of initial learning rate
+        
         scheduler = WarmupCosineSchedule(
             optimizer,
             warmup_steps=warmup_steps,
             t_total=total_steps,
+            end_lr=end_lr,
             cycles=0.5,
             last_epoch=-1,
+            warmup_multiplier=0  # Start warmup from 0
         )
-        print(f">> Using WarmupCosineSchedule: warmup_steps={warmup_steps} (10%), total_steps={total_steps}")
+        print(f">> Using WarmupCosineSchedule: warmup_steps={warmup_steps} ({warmup_pct*100:.0f}%), "
+              f"total_steps={total_steps}, end_lr={end_lr:.2e}")
     
     # Log model architecture and hyperparameters to wandb
     wandb_config = {
@@ -259,6 +307,8 @@ def setup(args) -> tuple[nn.Module, Any, Any, Any, DataLoader, DataLoader, int]:
         wandb_config["scheduler"] = "WarmupCosineSchedule"
         wandb_config["warmup_steps"] = warmup_steps
         wandb_config["total_steps"] = total_steps
+        wandb_config["end_lr"] = end_lr
+        wandb_config["warmup_pct"] = warmup_pct
     
     wandb.config.update(wandb_config)
     
@@ -291,23 +341,22 @@ def runTraining(args):
 
     for e in range(args.epochs):
         for m in ['train', 'val']:
-            match m:
-                case 'train':
-                    net.train()
-                    opt = optimizer
-                    cm = Dcm
-                    desc = f">> Training   ({e: 4d})"
-                    loader = train_loader
-                    log_loss = log_loss_tra
-                    log_dice = log_dice_tra
-                case 'val':
-                    net.eval()
-                    opt = None
-                    cm = torch.no_grad
-                    desc = f">> Validation ({e: 4d})"
-                    loader = val_loader
-                    log_loss = log_loss_val
-                    log_dice = log_dice_val
+            if m == 'train':
+                net.train()
+                opt = optimizer
+                cm = Dcm
+                desc = f">> Training   ({e: 4d})"
+                loader = train_loader
+                log_loss = log_loss_tra
+                log_dice = log_dice_tra
+            elif m == 'val':
+                net.eval()
+                opt = None
+                cm = torch.no_grad
+                desc = f">> Validation ({e: 4d})"
+                loader = val_loader
+                log_loss = log_loss_val
+                log_dice = log_dice_val
 
             with cm():  # Either dummy context manager, or the torch.no_grad for validation
                 j = 0
@@ -490,11 +539,11 @@ def main():
                         help="Custom name for wandb experiment run")
     parser.add_argument('--seed', type=int, default=42,
                         help="Random seed for reproducibility (default: 42)")
-    parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sam', 'novograd'],
+    parser.add_argument('--optimizer', type=str, default='novograd', choices=['adamw', 'sam', 'novograd'],
                         help="Optimizer to use for training (default: adamw)")
-    parser.add_argument('--use_scheduler', action='store_true',
+    parser.add_argument('--use_scheduler', action='store_true', default=True,
                         help="Use WarmupCosineSchedule learning rate scheduler")
-    parser.add_argument('--use_layer_wise_lr', action='store_true',
+    parser.add_argument('--use_layer_wise_lr', action='store_true', default=False,
                         help="Use layer-wise learning rates (different LRs for encoder/decoder) - only for Novograd")
     parser.add_argument('--grad_clip', type=float, default=1.0,
                         help="Gradient clipping max norm (0 to disable, default: 1.0)")
