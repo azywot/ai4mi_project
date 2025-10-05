@@ -64,6 +64,6 @@ def resample_inplane(arr, new_spacing=(1.0, 1.0), spacing=(1.0, 1.0, 2.5), is_la
     dy, dx, dz = spacing
     new_dy, new_dx = new_spacing
 
-    zoom_factors = [dy / new_dy, dx / new_dx, 1.0]  # keep z unchanged
+    zoom_factors = [dy / new_dy, dx / new_dx, 1.0] 
     order = 0 if is_label else 1
     return zoom(arr, zoom=zoom_factors, order=order)
