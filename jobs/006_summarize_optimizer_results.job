@@ -21,21 +21,13 @@ echo "=========================================="
 echo "Summarizing optimizer results"
 echo "=========================================="
 
-echo "Summarizing optimizer results for AdamW optimizer..."
-python /home/scur1622/group_project/ai4mi_project/jobs/optimizer_jobs/summarize_optimizer_results.py \
-  --optimizer adamw \
+optimizers=("adamw" "sam" "novograd" "ranger" "clmr")
 
-echo "Summarizing optimizer results for SAM optimizer..."
-python /home/scur1622/group_project/ai4mi_project/jobs/optimizer_jobs/summarize_optimizer_results.py \
-  --optimizer sam \
-
-echo "Summarizing optimizer results for Novograd optimizer..."
-python /home/scur1622/group_project/ai4mi_project/jobs/optimizer_jobs/summarize_optimizer_results.py \
-  --optimizer novograd \
-
-echo "Summarizing optimizer results for Ranger optimizer..."
-python /home/scur1622/group_project/ai4mi_project/jobs/optimizer_jobs/summarize_optimizer_results.py \
-  --optimizer ranger \
+for opt in "${optimizers[@]}"; do
+  echo "Summarizing optimizer results for ${opt^} optimizer..."
+  python /home/scur1622/group_project/ai4mi_project/jobs/optimizer_jobs/summarize_optimizer_results.py \
+    --optimizer "$opt"
+done
   
 echo "=========================================="
 echo "Summarizing optimizer results completed"
