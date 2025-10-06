@@ -356,16 +356,12 @@ def build_augmentation(name: str, seed: Optional[int] = None) -> PairTransform:
     return PRESETS[key].builder(seed)
 
 
-# -------------------------------------
-# Dataset wrapper to apply augmentations
-# -------------------------------------
 class AugmentedDataset(torch.utils.data.Dataset):
     """Wrap an existing dataset to apply paired augmentations.
 
-    Assumptions on the wrapped dataset's __getitem__ output:
-        item is a dict with keys 'images' -> Tensor[C,H,W] (float)
-                               'gts'    -> Tensor[K,H,W] one-hot OR [1,H,W] labels
-        Any additional keys are preserved.
+    Expects the base dataset to yield a dict with:
+      - 'images': Tensor[C,H,W] float in [0,1]
+      - 'gts'   : Tensor[K,H,W] one-hot OR [1,H,W] labels (long)
     """
 
     def __init__(self, base_ds, transform: PairTransform):
@@ -374,77 +370,85 @@ class AugmentedDataset(torch.utils.data.Dataset):
         # Try to detect number of classes K from first sample
         ex = self.base[0]
         mask = ex["gts"]
-        K = mask.shape[0] if mask.ndim == 3 else None
+        K = mask.shape[0] if (mask.ndim == 3 and mask.shape[0] > 1) else None
         self.num_classes = K
 
     def __len__(self):
         return len(self.base)
 
+    def __getitem__(self, idx: int):
+        item = self.base[idx]
+        image: Tensor = item["images"].to(torch.float32)
+        mask: Tensor = item["gts"]
 
-def __getitem__(self, idx: int):
-    item = self.base[idx]
-    image: Tensor = item["images"].to(torch.float32)
-    mask: Tensor = item["gts"]
+        # --- standardize mask to [K,H,W] float ---
+        if mask.ndim == 3 and mask.shape[0] > 1:
+            mask_oh = mask.to(torch.float32)
+            if self.num_classes is None:
+                self.num_classes = int(mask_oh.shape[0])
+        else:
+            labels = _onehot_to_labels(mask)  # [1,H,W] long
+            if self.num_classes is None:
+                raise RuntimeError(
+                    "num_classes could not be inferred; provide one-hot masks in the dataset"
+                )
+            mask_oh = _labels_to_onehot(labels, self.num_classes)
 
-    # --- standardize mask to [K,H,W] float ---
-    if mask.ndim == 3 and mask.shape[0] > 1:
-        mask_oh = mask.to(torch.float32)
-        K = mask_oh.shape[0]
-        if self.num_classes is None:
-            self.num_classes = K
-    else:
-        labels = _onehot_to_labels(mask)  # handles [1,H,W] long
-        if self.num_classes is None:
-            raise RuntimeError(
-                "num_classes could not be inferred; provide one-hot masks in the dataset"
-            )
-        mask_oh = _labels_to_onehot(labels, self.num_classes)
+        # --- apply paired transform ---
+        img_t, msk_t = self.transform(image, mask_oh)
 
-    # --- apply paired transform ---
-    img_t, msk_t = self.transform(image, mask_oh)
+        # --- enforce strict one-hot after any geometric warp ---
+        # prevents all-zero rows from padding; maps them to background=0
+        hard_labels = msk_t.argmax(dim=0, keepdim=True).long()  # [1,H,W]
+        msk_t = _labels_to_onehot(hard_labels, self.num_classes).float()  # [K,H,W]
 
-    # --- enforce strict one-hot after any geometric warp ---
-    # (prevents all-zero channels due to padding; maps them to background=0)
-    hard_labels = msk_t.argmax(dim=0, keepdim=True).to(torch.long)  # [1,H,W]
-    msk_t = _labels_to_onehot(hard_labels, self.num_classes).to(
-        torch.float32
-    )  # [K,H,W]
+        # keep images in [0,1]
+        img_t = torch.clamp(img_t, 0.0, 1.0)
 
-    # (optional) keep images in [0,1]
-    img_t = torch.clamp(img_t, 0.0, 1.0)
-
-    # --- pack output ---
-    out = dict(item)
-    out["images"] = img_t
-    out["gts"] = msk_t
-    return out
+        out = dict(item)
+        out["images"] = img_t
+        out["gts"] = msk_t
+        return out
 
 
 def save_aug_examples(dataset, dest: Path, n_samples: int = 4, n_augments: int = 3):
     """
-    Save example augmentations from an AugmentedDataset.
+    Save example augmentations *and* the original images from an AugmentedDataset (or compatible dataset).
 
     Args:
-        dataset: an AugmentedDataset (or any dataset yielding dict with "images" and "gts")
+        dataset: dataset yielding dict with "images" [C,H,W] float in [0,1]
         dest: output folder (Path)
-        n_samples: number of different dataset items
-        n_augments: how many augmentations to draw per sample
+        n_samples: number of different dataset items to preview
+        n_augments: how many augmented versions to draw per sample
     """
     dest = Path(dest) / "aug_examples"
     dest.mkdir(parents=True, exist_ok=True)
 
     for idx in range(min(n_samples, len(dataset))):
+        # --- save the original (before applying augmentation transform) ---
+        base = getattr(
+            dataset, "base", dataset
+        )  # if AugmentedDataset, get underlying dataset
+        item_orig = base[idx]
+        img_orig = item_orig["images"]  # [C,H,W]
+        grid = vutils.make_grid(img_orig.unsqueeze(0), normalize=True, scale_each=True)
+        ndarr = grid.mul(255).byte().permute(1, 2, 0).cpu().numpy()
+        Image.fromarray(ndarr).save(dest / f"sample{idx:02d}_orig.png")
+
+        # --- save n_augments augmented versions ---
         for j in range(n_augments):
-            item = dataset[idx]
+            item = dataset[
+                idx
+            ]  # will trigger augmentation if dataset is AugmentedDataset
             img = item["images"]
-            # Convert image tensor [C,H,W] to grid
             grid = vutils.make_grid(img.unsqueeze(0), normalize=True, scale_each=True)
             ndarr = grid.mul(255).byte().permute(1, 2, 0).cpu().numpy()
             Image.fromarray(ndarr).save(dest / f"sample{idx:02d}_aug{j:02d}.png")
 
+    print(f">> Saved augmentation previews (with originals) to {dest}")
+
 
 def add_augmentation_cli(parser) -> None:
-    """Extend an argparse.ArgumentParser with augmentation flags."""
     group = parser.add_argument_group("Augmentation")
     group.add_argument(
         "--aug",
@@ -454,16 +458,12 @@ def add_augmentation_cli(parser) -> None:
         help="Augmentation preset to use for training",
     )
     group.add_argument(
-        "--aug-seed",
-        type=int,
-        default=None,
-        help="Seed for deterministic augmentation",
+        "--aug-seed", type=int, default=None, help="Seed for deterministic augmentation"
     )
 
 
 def wrap_train_dataset_if_needed(train_set, args):
-    """Convenience helper to wrap train_set with augmentation based on args.
-    Expects args.aug and args.aug_seed (added by add_augmentation_cli)."""
+    """Wrap train_set with augmentation based on args."""
     if getattr(args, "aug", "none") and args.aug != "none":
         aug = build_augmentation(args.aug, seed=args.aug_seed)
         return AugmentedDataset(train_set, aug)
