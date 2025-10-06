@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, Optional, Tuple
 import math
-
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+import torchvision.utils as vutils
+from pathlib import Path
+from PIL import Image
 
 # ---------------------------
 # Helper types and utilities
@@ -378,31 +380,44 @@ class AugmentedDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.base)
 
-    def __getitem__(self, idx: int):
-        item = self.base[idx]
-        image: Tensor = item["images"].to(torch.float32)
-        mask: Tensor = item["gts"]
-        # standardize mask to [K,H,W] float
-        if mask.ndim == 3 and mask.shape[0] > 1:
-            mask_oh = mask.to(torch.float32)
-        else:
-            labels = _onehot_to_labels(mask)  # handles [1,H,W] long
-            if self.num_classes is None:
-                raise RuntimeError(
-                    "num_classes could not be inferred; provide one-hot masks in the dataset"
-                )
-            mask_oh = _labels_to_onehot(labels, self.num_classes)
-        img_t, msk_t = self.transform(image, mask_oh)
-        # keep one-hot format for downstream criterion
-        out = dict(item)
-        out["images"] = img_t
-        out["gts"] = msk_t
-        return out
 
+def __getitem__(self, idx: int):
+    item = self.base[idx]
+    image: Tensor = item["images"].to(torch.float32)
+    mask: Tensor = item["gts"]
 
-import torchvision.utils as vutils
-from pathlib import Path
-from PIL import Image
+    # --- standardize mask to [K,H,W] float ---
+    if mask.ndim == 3 and mask.shape[0] > 1:
+        mask_oh = mask.to(torch.float32)
+        K = mask_oh.shape[0]
+        if self.num_classes is None:
+            self.num_classes = K
+    else:
+        labels = _onehot_to_labels(mask)  # handles [1,H,W] long
+        if self.num_classes is None:
+            raise RuntimeError(
+                "num_classes could not be inferred; provide one-hot masks in the dataset"
+            )
+        mask_oh = _labels_to_onehot(labels, self.num_classes)
+
+    # --- apply paired transform ---
+    img_t, msk_t = self.transform(image, mask_oh)
+
+    # --- enforce strict one-hot after any geometric warp ---
+    # (prevents all-zero channels due to padding; maps them to background=0)
+    hard_labels = msk_t.argmax(dim=0, keepdim=True).to(torch.long)  # [1,H,W]
+    msk_t = _labels_to_onehot(hard_labels, self.num_classes).to(
+        torch.float32
+    )  # [K,H,W]
+
+    # (optional) keep images in [0,1]
+    img_t = torch.clamp(img_t, 0.0, 1.0)
+
+    # --- pack output ---
+    out = dict(item)
+    out["images"] = img_t
+    out["gts"] = msk_t
+    return out
 
 
 def save_aug_examples(dataset, dest: Path, n_samples: int = 4, n_augments: int = 3):
