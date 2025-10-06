@@ -42,6 +42,8 @@ import wandb
 from sam import SAM
 from monai.optimizers import Novograd, WarmupCosineSchedule, generate_param_groups
 
+# Ranger optimizer (RAdam + LookAhead + Gradient Centralization)
+from ranger import Ranger
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
@@ -263,6 +265,34 @@ def setup(args) -> tuple[nn.Module, Any, Any, Any, DataLoader, DataLoader, int]:
                 "amsgrad": False,
                 "layer_wise_lr": False,
             }
+    elif args.optimizer == "ranger":
+        lr = 0.002  # Higher LR for faster convergence, matching AdamW scale
+        if Ranger is None:
+            raise ImportError(
+                "Ranger optimizer is not installed. Install it via 'pip install git+https://github.com/lessw2020/Ranger-Deep-Learning-Optimizer' or clone and 'pip install -e .'"
+            )
+
+        optimizer = Ranger(
+            net.parameters(),
+            lr=lr,
+            alpha=0.6,  # Slightly more aggressive lookahead
+            k=5,  # More frequent lookahead updates for better adaptation
+            betas=(0.9, 0.999),  # Standard Adam-like betas
+            eps=1e-8,  # Standard epsilon for better precision
+            weight_decay=0,  # No weight decay - let GC handle regularization
+            use_gc=True,  # Gradient Centralization for implicit regularization
+            gc_conv_only=True  # Apply GC only to conv layers (less aggressive)
+        )
+        optimizer_config = {
+            "optimizer": "Ranger",
+            "alpha": 0.6,
+            "k": 5,
+            "betas": (0.9, 0.999),
+            "eps": 1e-8,
+            "weight_decay": 0,
+            "use_gc": True,
+            "gc_conv_only": True,
+        }
     else:
         raise ValueError(f"Unknown optimizer: {args.optimizer}")
     
@@ -539,14 +569,14 @@ def main():
                         help="Custom name for wandb experiment run")
     parser.add_argument('--seed', type=int, default=42,
                         help="Random seed for reproducibility (default: 42)")
-    parser.add_argument('--optimizer', type=str, default='novograd', choices=['adamw', 'sam', 'novograd'],
+    parser.add_argument('--optimizer', type=str, default='novograd', choices=['adamw', 'sam', 'novograd', 'ranger'],
                         help="Optimizer to use for training (default: adamw)")
     parser.add_argument('--use_scheduler', action='store_true', default=True,
                         help="Use WarmupCosineSchedule learning rate scheduler")
     parser.add_argument('--use_layer_wise_lr', action='store_true', default=False,
                         help="Use layer-wise learning rates (different LRs for encoder/decoder) - only for Novograd")
-    parser.add_argument('--grad_clip', type=float, default=1.0,
-                        help="Gradient clipping max norm (0 to disable, default: 1.0)")
+    parser.add_argument('--grad_clip', type=float, default=5.0,
+                        help="Gradient clipping max norm (0 to disable, default: 5.0)")
 
     args = parser.parse_args()
 

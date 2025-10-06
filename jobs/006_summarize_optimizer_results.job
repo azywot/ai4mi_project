@@ -1,0 +1,44 @@
+#!/bin/bash
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=optimizer_results
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=00:30:00
+#SBATCH --output=/home/scur1622/group_project/ai4mi_project/out/optimizer_results.log
+
+module purge
+module load 2023
+module load Anaconda3/2023.07-2
+
+# Change to your project directory
+cd $HOME/group_project/ai4mi_project/
+
+# Activate the virtual environment
+source ai4mi/bin/activate
+
+echo "=========================================="
+echo "Summarizing optimizer results"
+echo "=========================================="
+
+echo "Summarizing optimizer results for AdamW optimizer..."
+python /home/scur1622/group_project/ai4mi_project/jobs/optimizer_jobs/summarize_optimizer_results.py \
+  --optimizer adamw \
+
+echo "Summarizing optimizer results for SAM optimizer..."
+python /home/scur1622/group_project/ai4mi_project/jobs/optimizer_jobs/summarize_optimizer_results.py \
+  --optimizer sam \
+
+echo "Summarizing optimizer results for Novograd optimizer..."
+python /home/scur1622/group_project/ai4mi_project/jobs/optimizer_jobs/summarize_optimizer_results.py \
+  --optimizer novograd \
+
+echo "Summarizing optimizer results for Ranger optimizer..."
+python /home/scur1622/group_project/ai4mi_project/jobs/optimizer_jobs/summarize_optimizer_results.py \
+  --optimizer ranger \
+  
+echo "=========================================="
+echo "Summarizing optimizer results completed"
+echo "=========================================="
+
+
