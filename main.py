@@ -368,9 +368,8 @@ def runTraining(args):
                             # Decide per-epoch save dir (temporary if save_best_only)
                             base_iter_dir = (args.dest / "_tmp" / f"iter{e:03d}") if args.save_best_only else (args.dest / f"iter{e:03d}")
                             save_images(predicted_class * mult,
-                                        data['stems'],
-                                        base_iter_dir / m)
-                                        base_iter_dir / m)
+                                            data['stems'],
+                                            base_iter_dir / m)
 
                     j += B  # Keep in mind that _in theory_, each batch might have a different size
                     # For the DSC average: do not take the background class (0) into account:
