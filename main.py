@@ -308,7 +308,7 @@ def runTraining(args):
                     # Metrics computation, not used for training
                     pred_seg = probs2one_hot(pred_probs)
                     log_dice[e, j : j + B, :] = dice_coef(
-                        pred_seg, gt
+                        pred_seg.bool(), gt.bool()
                     )  # One DSC value per sample and per class
 
                     loss = loss_fn(pred_probs, gt)
