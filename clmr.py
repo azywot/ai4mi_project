@@ -47,14 +47,14 @@ class CreativeCLMRScheduler:
         self.min_cycle_scale = 0.3  # Don't go below 30% of base cycle
         self.t = 0  # global step
 
-        # Lookahead parameters
+        # Lookahead parameters - use group index as key instead of params list
         self.lookahead_params = {}
         self.lookahead_step = 0
 
         # Initialize lookahead
         if self.lookahead_steps > 0:
-            for group in self.opt.param_groups:
-                self.lookahead_params[group['params']] = {}
+            for group_idx, group in enumerate(self.opt.param_groups):
+                self.lookahead_params[group_idx] = {}
 
         # Validate Nesterov SGD
         for g in self.opt.param_groups:
@@ -110,10 +110,12 @@ class CreativeCLMRScheduler:
         # Store current parameters for lookahead
         if self.lookahead_step == 0:
             for group_idx, group in enumerate(self.opt.param_groups):
+                if group_idx not in self.lookahead_params:
+                    self.lookahead_params[group_idx] = {}
                 for param_idx, param in enumerate(group['params']):
-                    if param not in self.lookahead_params:
-                        self.lookahead_params[param] = {}
-                    self.lookahead_params[param]['slow'] = param.data.clone()
+                    if param_idx not in self.lookahead_params[group_idx]:
+                        self.lookahead_params[group_idx][param_idx] = {}
+                    self.lookahead_params[group_idx][param_idx]['slow'] = param.data.clone()
 
         # Update fast parameters (current training)
         self.lookahead_step += 1
@@ -123,9 +125,11 @@ class CreativeCLMRScheduler:
             alpha = 0.5  # Lookahead mixing factor
             for group_idx, group in enumerate(self.opt.param_groups):
                 for param_idx, param in enumerate(group['params']):
-                    if param in self.lookahead_params:
+                    if (group_idx in self.lookahead_params and 
+                        param_idx in self.lookahead_params[group_idx]):
                         # Mix fast and slow parameters
-                        param.data.mul_(1 - alpha).add_(self.lookahead_params[param]['slow'], alpha=alpha)
+                        slow_param = self.lookahead_params[group_idx][param_idx]['slow']
+                        param.data.mul_(1 - alpha).add_(slow_param, alpha=alpha)
             self.lookahead_step = 0
 
     def step(self):
