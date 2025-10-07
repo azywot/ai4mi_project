@@ -66,7 +66,8 @@ from losses import (CrossEntropy, DiceLoss, CEDiceLoss, FocalCrossEntropy,
                     GeneralizedDiceLoss, TverskyLoss, DiceFocalLoss,
                     MonaiDiceLossWrapper, MonaiGeneralizedDiceLossWrapper,
                     MonaiTverskyLossWrapper, MonaiDiceCELossWrapper,
-                    MonaiFocalLossWrapper, MonaiHausdorffDTLossWrapper)
+                    MonaiFocalLossWrapper, MonaiHausdorffDTLossWrapper,
+                    HausdorffDTLikeLoss)
 
 
 def set_random_seed(seed: int = 42) -> None:
@@ -232,7 +233,7 @@ def runTraining(args):
     elif args.loss == 'dice':
         loss_fn = DiceLoss(idk=idk)
     elif args.loss == 'cedice':
-        loss_fn = CEDiceLoss(idk=idk)
+        loss_fn = CEDiceLoss(idk=idk, alpha=args.cedice_alpha, beta=args.cedice_beta)
     elif args.loss == 'focal':
         loss_fn = FocalCrossEntropy(idk=idk)
     elif args.loss == 'gdl':
@@ -240,7 +241,12 @@ def runTraining(args):
     elif args.loss == 'tversky':
         loss_fn = TverskyLoss(idk=idk)
     elif args.loss == 'dicefocal':
-        loss_fn = DiceFocalLoss(idk=idk)
+        loss_fn = DiceFocalLoss(idk=idk,
+                                alpha_dice=args.dicefocal_alpha_dice,
+                                beta_focal=args.dicefocal_beta_focal,
+                                gamma=args.dicefocal_gamma,
+                                focal_alpha_bg=args.dicefocal_alpha_bg,
+                                focal_alpha_fg=args.dicefocal_alpha_fg)
     elif args.loss == 'monai_dice':
         loss_fn = MonaiDiceLossWrapper(idk=idk)
     elif args.loss == 'monai_gdl':
@@ -253,6 +259,8 @@ def runTraining(args):
         loss_fn = MonaiFocalLossWrapper(idk=idk)
     elif args.loss == 'monai_hausdorffdt':
         loss_fn = MonaiHausdorffDTLossWrapper(idk=idk)
+    elif args.loss == 'hausdorff':
+        loss_fn = HausdorffDTLikeLoss(idk=idk)
     else:
         raise ValueError(f"Unknown loss: {args.loss}")
 
@@ -436,7 +444,7 @@ def main():
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
     parser.add_argument('--loss', default='ce', choices=['ce', 'dice', 'cedice', 'focal', 'gdl', 'tversky', 'dicefocal',
                                                          'monai_dice', 'monai_gdl', 'monai_tversky', 'monai_dicece', 'monai_focal',
-                                                         'monai_hausdorffdt'],
+                                                         'monai_hausdorffdt', 'hausdorff'],
                         help="Loss function to use for training")
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
@@ -457,6 +465,20 @@ def main():
                         help="Random seed for reproducibility (default: 42)")
     parser.add_argument('--save_best_only', action='store_true',
                         help="If set, only store images for best_epoch; intermediate epoch images are temporary")
+    parser.add_argument('--cedice_alpha', type=float, default=0.5,
+                        help="Weight for CE term in CE+Dice (alpha)")
+    parser.add_argument('--cedice_beta', type=float, default=0.5,
+                        help="Weight for Dice term in CE+Dice (beta)")
+    parser.add_argument('--dicefocal_alpha_dice', type=float, default=0.5,
+                        help="Weight for Dice term in Dice+Focal (alpha_dice)")
+    parser.add_argument('--dicefocal_beta_focal', type=float, default=0.5,
+                        help="Weight for Focal term in Dice+Focal (beta_focal)")
+    parser.add_argument('--dicefocal_gamma', type=float, default=2.0,
+                        help="Focal gamma parameter for Dice+Focal")
+    parser.add_argument('--dicefocal_alpha_bg', type=float, default=None,
+                        help="Optional focal alpha weight for background class (if set)")
+    parser.add_argument('--dicefocal_alpha_fg', type=float, default=None,
+                        help="Optional focal alpha weight for foreground classes (if set)")
 
     args = parser.parse_args()
 

@@ -33,6 +33,8 @@ from monai.losses import DiceCELoss as MonaiDiceCE
 from monai.losses import FocalLoss as MonaiFocal
 from monai.losses import HausdorffDTLoss as MonaiHausdorffDT
 from utils import simplex, sset
+import numpy as np
+from scipy.ndimage import distance_transform_edt
 
 
 class CrossEntropy():
@@ -197,14 +199,36 @@ class TverskyLoss:
 
 
 class DiceFocalLoss:
-    def __init__(self, alpha_dice: float = 0.5, beta_focal: float = 0.5, gamma: float = 2.0, **kwargs):
+    def __init__(self,
+                 alpha_dice: float = 0.5,
+                 beta_focal: float = 0.5,
+                 gamma: float = 2.0,
+                 focal_alpha_bg: float | None = None,
+                 focal_alpha_fg: float | None = None,
+                 **kwargs):
         self.idk = kwargs['idk']
         self.alpha_dice = alpha_dice
         self.beta_focal = beta_focal
         self.gamma = gamma
         self._dice = DiceLoss(idk=self.idk)
-        self._focal = FocalCrossEntropy(idk=self.idk, gamma=gamma)
-        print(f"Initialized {self.__class__.__name__} with alpha_dice={alpha_dice}, beta_focal={beta_focal}, gamma={gamma}, idk={self.idk}")
+
+        # Build focal alpha weighting if requested
+        alpha_param = None
+        if (focal_alpha_bg is not None) or (focal_alpha_fg is not None):
+            # Default missing one to 1.0 (no extra weighting)
+            bg_w = 1.0 if focal_alpha_bg is None else float(focal_alpha_bg)
+            fg_w = 1.0 if focal_alpha_fg is None else float(focal_alpha_fg)
+            # Map per selected classes; if class 0 present -> bg weight, others -> fg weight
+            alpha_vec = []
+            for cls in self.idk:
+                if cls == 0:
+                    alpha_vec.append(bg_w)
+                else:
+                    alpha_vec.append(fg_w)
+            alpha_param = alpha_vec
+
+        self._focal = FocalCrossEntropy(idk=self.idk, gamma=gamma, alpha=alpha_param)
+        print(f"Initialized {self.__class__.__name__} with alpha_dice={alpha_dice}, beta_focal={beta_focal}, gamma={gamma}, idk={self.idk}, focal_alpha={alpha_param}")
 
     def __call__(self, pred_softmax: torch.Tensor, weak_target: torch.Tensor) -> torch.Tensor:
         return self.alpha_dice * self._dice(pred_softmax, weak_target) + self.beta_focal * self._focal(pred_softmax, weak_target)
@@ -308,3 +332,49 @@ class MonaiHausdorffDTLossWrapper:
         p = pred_softmax[:, self.idk, ...]
         t = weak_target[:, self.idk, ...].float()
         return self._loss(p, t)
+
+
+class HausdorffDTLikeLoss:
+    def __init__(self, alpha: float = 2.0, **kwargs):
+        # Uses Euclidean distance transform on both prediction and target boundaries.
+        # Works on probabilities (soft), combined with one-hot targets. Excludes classes via idk.
+        self.idk = kwargs['idk']
+        self.alpha = alpha
+        self.eps: float = kwargs['eps'] if 'eps' in kwargs else 1e-6
+        print(f"Initialized {self.__class__.__name__} with idk={self.idk}, alpha={alpha}")
+
+    @staticmethod
+    def _one_minus(dt: np.ndarray) -> np.ndarray:
+        # helper for numerical stability if needed
+        return 1.0 - dt
+
+    def __call__(self, pred_softmax: torch.Tensor, weak_target: torch.Tensor) -> torch.Tensor:
+        assert pred_softmax.shape == weak_target.shape
+        assert simplex(pred_softmax)
+        assert sset(weak_target, [0, 1])
+
+        p = pred_softmax[:, self.idk, ...]
+        t = weak_target[:, self.idk, ...].float()
+
+        # Compute per-class per-sample boundary distance maps on CPU with scipy EDT
+        # Distance maps are constants; keep all arithmetic with probabilities in torch to preserve gradients
+        B, C, H, W = p.shape
+        total: torch.Tensor = torch.zeros((), device=p.device, dtype=p.dtype)
+
+        for b in range(B):
+            for c in range(C):
+                # Target boundary distance map (numpy)
+                gt_np = t[b, c].detach().cpu().numpy().astype(np.uint8)
+                dt_fg = distance_transform_edt(gt_np > 0)
+                dt_bg = distance_transform_edt(gt_np == 0)
+                sdt = dt_fg - dt_bg
+
+                # Bring distance map to torch (constant w.r.t. model parameters)
+                dist_t = torch.from_numpy(np.abs(sdt) ** self.alpha).to(device=p.device, dtype=p.dtype)
+
+                # Torch arithmetic keeps gradient through p[b, c]
+                contrib = (p[b, c] * dist_t).mean()
+                total = total + contrib
+
+        denom = (B * C) if (B * C) > 0 else 1
+        return total / denom
