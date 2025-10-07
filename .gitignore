@@ -14,7 +14,6 @@ student-15704939
 .env
 outfiles/
 val/gt
-.png
 /wandb
 
 # Ignore everything inside those subdirectories

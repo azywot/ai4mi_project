@@ -508,8 +508,6 @@ def main():
                         help="Custom name for wandb experiment run")
     parser.add_argument('--seed', type=int, default=42,
                         help="Random seed for reproducibility (default: 42)")
-    parser.add_argument('--save_best_only', action='store_true',
-                        help="If set, only store images for best_epoch; intermediate epoch images are temporary")
     
     ###############################################################################
     parser.add_argument('--model_class', type=str, default='ENet',
