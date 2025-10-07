@@ -217,7 +217,7 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
         debug=args.debug,
     )
     train_set = wrap_train_dataset_if_needed(
-        train_set, args
+        train_set, args, K=K
     )  # Add augmentation if specified
 
     if args.aug != "none":
@@ -308,7 +308,7 @@ def runTraining(args):
                     # Metrics computation, not used for training
                     pred_seg = probs2one_hot(pred_probs)
                     log_dice[e, j : j + B, :] = dice_coef(
-                        pred_seg.bool(), gt.bool()
+                        pred_seg, gt
                     )  # One DSC value per sample and per class
 
                     loss = loss_fn(pred_probs, gt)

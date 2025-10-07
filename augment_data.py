@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 
 # -------------------------
-# batchgenerators (preview)
+# batchgenerators
 # -------------------------
 from batchgenerators.dataloading.single_threaded_augmenter import (
     SingleThreadedAugmenter,
@@ -35,10 +35,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from dataset import (
-    SliceDataset,
-)  # expects dict with 'images' [1,H,W] and 'gts' (one-hot [K,H,W] or labels [1,H,W])
-from utils import class2one_hot  # used if labels are not one-hot
+from dataset import SliceDataset
+from utils import class2one_hot
 
 # =============================================================================
 # Helpers (common)
@@ -91,8 +89,18 @@ def _colorize_labels(one_hot: np.ndarray) -> np.ndarray:
     return rgb
 
 
+def _labels_to_onehot(labels: np.ndarray, K: int) -> np.ndarray:
+    """Convert label array to one-hot encoding"""
+    if labels.ndim == 3 and labels.shape[0] > 1:
+        return labels  # already one-hot
+    if labels.ndim == 3:
+        labels = labels[0]  # [H,W]
+    onehot = np.eye(K, dtype=np.float32)[labels.astype(np.int64)]
+    return np.transpose(onehot, (2, 0, 1))  # [K,H,W]
+
+
 # =============================================================================
-# Batchgenerators PREVIEW pipeline (no change to training)
+# Batchgenerators augmentation pipeline
 # =============================================================================
 
 
@@ -216,6 +224,33 @@ def preset_compose(name: str, patch_shape: Tuple[int, int]) -> BGCompose:
             p_per_sample=0.15,
             patch_shape=patch_shape,
         )
+    elif name == "basic+elastic":
+        return build_bg_compose(
+            mirror=True,
+            rotations=True,
+            scaling=True,
+            elastic=True,
+            brightness=True,
+            contrast=False,
+            gamma=False,
+            gaussian_noise=False,
+            p_per_sample=0.15,
+            patch_shape=patch_shape,
+        )
+    elif name == "hu+basic":
+        # HU windowing would be applied in preprocessing, so same as basic here
+        return build_bg_compose(
+            mirror=True,
+            rotations=True,
+            scaling=False,
+            elastic=False,
+            brightness=True,
+            contrast=True,
+            gamma=False,
+            gaussian_noise=False,
+            p_per_sample=0.15,
+            patch_shape=patch_shape,
+        )
     elif name == "none":
         return BGCompose([])
     else:
@@ -289,335 +324,58 @@ class BGDataAugmentor:
 
 
 # =============================================================================
-# PyTorch TRAINING pipeline (used by main.py)
+# Wrapper for training with batchgenerators
 # =============================================================================
 
 
-def _ensure_chw(x: Tensor) -> Tensor:
-    if x.ndim == 2:
-        return x.unsqueeze(0)
-    return x
-
-
-def _labels_to_onehot(labels: Tensor, K: int) -> Tensor:
-    assert labels.ndim == 3 and labels.shape[0] == 1
-    oh = F.one_hot(labels.squeeze(0), num_classes=K).permute(2, 0, 1).to(torch.float32)
-    return oh
-
-
-class PairTransform:
-    def __call__(self, image: Tensor, mask_oh: Tensor) -> Tuple[Tensor, Tensor]:
-        raise NotImplementedError
-
-
-class ComposePT(PairTransform):
-    def __init__(self, transforms: List[PairTransform]):
-        self.transforms = transforms
-
-    def __call__(self, image: Tensor, mask_oh: Tensor) -> Tuple[Tensor, Tensor]:
-        for t in self.transforms:
-            image, mask_oh = t(image, mask_oh)
-        return image, mask_oh
-
-
-class RNG:
-    def __init__(
-        self, seed: Optional[int] = None, device: Optional[torch.device] = None
-    ):
-        self.gen = torch.Generator(device=device or torch.device("cpu"))
-        if seed is not None:
-            self.gen.manual_seed(int(seed))
-        self.device = device or torch.device("cpu")
-
-    def rand(self):
-        return float(torch.rand((), generator=self.gen, device=self.device))
-
-    def normal(self, shape, mean=0.0, std=1.0):
-        return torch.normal(
-            mean=mean, std=std, size=shape, generator=self.gen, device=self.device
-        )
-
-
-# Individual transforms (PT)
-class RandomFlipRotate(PairTransform):
-    def __init__(self, p_h=0.5, p_v=0.5, max_deg=10.0, rng: Optional[RNG] = None):
-        self.p_h, self.p_v, self.max_deg = p_h, p_v, max_deg
-        self.rng = rng or RNG()
-
-    def __call__(self, image: Tensor, mask: Tensor):
-        image = _ensure_chw(image)
-        mask = _ensure_chw(mask)
-        if self.rng.rand() < self.p_h:
-            image = torch.flip(image, [2])
-            mask = torch.flip(mask, [2])
-        if self.rng.rand() < self.p_v:
-            image = torch.flip(image, [1])
-            mask = torch.flip(mask, [1])
-        angle = (self.rng.rand() * 2 - 1) * self.max_deg
-        if abs(angle) > 1e-3:
-            th = np.deg2rad(angle)
-            c, s = np.cos(th), np.sin(th)
-            A = torch.tensor(
-                [[c, -s, 0.0], [s, c, 0.0]], dtype=torch.float32, device=image.device
-            ).unsqueeze(0)
-            H, W = image.shape[-2:]
-            grid = F.affine_grid(A, size=(1, image.shape[0], H, W), align_corners=False)
-            image = F.grid_sample(
-                image.unsqueeze(0),
-                grid,
-                mode="bilinear",
-                padding_mode="border",
-                align_corners=False,
-            ).squeeze(0)
-            mask = F.grid_sample(
-                mask.unsqueeze(0),
-                grid,
-                mode="nearest",
-                padding_mode="border",
-                align_corners=False,
-            ).squeeze(0)
-        return image, mask
-
-
-class IntensityShift(PairTransform):
-    def __init__(self, mul=(0.95, 1.05), add=(-0.02, 0.02), rng: Optional[RNG] = None):
-        self.mul, self.add = mul, add
-        self.rng = rng or RNG()
-
-    def __call__(self, image: Tensor, mask: Tensor):
-        m = self.mul[0] + self.rng.rand() * (self.mul[1] - self.mul[0])
-        a = self.add[0] + self.rng.rand() * (self.add[1] - self.add[0])
-        image = torch.clamp(image * m + a, 0, 1)
-        return image, mask
-
-
-class HUWindowing(PairTransform):
-    def __init__(
-        self,
-        center=40.0,
-        width=400.0,
-        input_hu_range: Optional[Tuple[float, float]] = (0.0, 1.0),
-    ):
-        self.c = float(center)
-        self.w = float(width)
-        self.r = input_hu_range
-
-    def __call__(self, image: Tensor, mask: Tensor):
-        image = _ensure_chw(image).to(torch.float32)
-        mask = _ensure_chw(mask)
-        if self.r is not None:
-            lo, hi = self.r
-            image_hu = image * (hi - lo) + lo
-        else:
-            image_hu = image
-        wmin, wmax = self.c - self.w / 2, self.c + self.w / 2
-        image_hu = torch.clamp(image_hu, wmin, wmax)
-        image = (image_hu - wmin) / max(self.w, 1e-6)
-        return image, mask
-
-
-class ElasticDeformation(PairTransform):
-    def __init__(self, alpha=12.0, sigma=6.0, rng: Optional[RNG] = None):
-        self.alpha = float(alpha)
-        self.sigma = float(sigma)
-        self.rng = rng or RNG()
-
-    @staticmethod
-    def _gauss2d(sigma, device):
-        k = max(3, int(6 * sigma) | 1)
-        ax = torch.arange(k, device=device) - k // 2
-        xx, yy = torch.meshgrid(ax, ax, indexing="ij")
-        k2 = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
-        k2 = k2 / k2.sum().clamp_min(1e-8)
-        return k2
-
-    def __call__(self, image: Tensor, mask: Tensor):
-        image = _ensure_chw(image)
-        mask = _ensure_chw(mask)
-        C, H, W = image.shape
-        dev = image.device
-        disp = self.rng.normal((2, H, W)).to(dev, torch.float32)
-        k = self._gauss2d(self.sigma, dev).expand(2, 1, -1, -1)
-        disp = F.conv2d(
-            disp.unsqueeze(0), k, padding=k.shape[-1] // 2, groups=2
-        ).squeeze(0)
-        disp = disp * (self.alpha / max(H, W))
-        yy, xx = torch.meshgrid(
-            torch.linspace(-1, 1, H, device=dev),
-            torch.linspace(-1, 1, W, device=dev),
-            indexing="ij",
-        )
-        grid = torch.stack((xx, yy), dim=-1)
-        grid = grid + torch.stack((disp[1] * 2.0, disp[0] * 2.0), dim=-1)
-        grid = grid.clamp(-1, 1)
-        image = F.grid_sample(
-            image.unsqueeze(0),
-            grid.unsqueeze(0),
-            mode="bilinear",
-            padding_mode="border",
-            align_corners=True,
-        ).squeeze(0)
-        mask = F.grid_sample(
-            mask.unsqueeze(0),
-            grid.unsqueeze(0),
-            mode="nearest",
-            padding_mode="border",
-            align_corners=True,
-        ).squeeze(0)
-        return image, mask
-
-
-class RandomScale(PairTransform):
-    def __init__(self, scale=(0.9, 1.1), rng: Optional[RNG] = None):
-        self.scale = scale
-        self.rng = rng or RNG()
-
-    def __call__(self, image: Tensor, mask: Tensor):
-        s = self.scale[0] + self.rng.rand() * (self.scale[1] - self.scale[0])
-        A = torch.tensor(
-            [[s, 0, 0], [0, s, 0]], dtype=torch.float32, device=image.device
-        ).unsqueeze(0)
-        H, W = image.shape[-2:]
-        grid = F.affine_grid(A, size=(1, image.shape[0], H, W), align_corners=False)
-        image = F.grid_sample(
-            image.unsqueeze(0),
-            grid,
-            mode="bilinear",
-            padding_mode="border",
-            align_corners=False,
-        ).squeeze(0)
-        mask = F.grid_sample(
-            mask.unsqueeze(0),
-            grid,
-            mode="nearest",
-            padding_mode="border",
-            align_corners=False,
-        ).squeeze(0)
-        return image, mask
-
-
-class GammaCorrection(PairTransform):
-    def __init__(self, gamma=(0.7, 1.5), rng: Optional[RNG] = None):
-        self.gamma = gamma
-        self.rng = rng or RNG()
-
-    def __call__(self, image: Tensor, mask: Tensor):
-        g = self.gamma[0] + self.rng.rand() * (self.gamma[1] - self.gamma[0])
-        image = image.clamp_min(1e-6).pow(g).clamp(0, 1)
-        return image, mask
-
-
-class GaussianNoise(PairTransform):
-    def __init__(self, sigma=(0.0, 0.02), rng: Optional[RNG] = None):
-        self.sigma = sigma
-        self.rng = rng or RNG()
-
-    def __call__(self, image: Tensor, mask: Tensor):
-        s = self.sigma[0] + self.rng.rand() * (self.sigma[1] - self.sigma[0])
-        noise = self.rng.normal(image.shape, std=s).to(image.device, image.dtype)
-        image = (image + noise).clamp(0, 1)
-        return image, mask
-
-
-# Build PT presets (names compatible with your CLI)
-def _build_pt_preset(name: str, seed: Optional[int]) -> PairTransform:
-    rng = RNG(seed)
-    key = name.lower()
-    if key == "none":
-        return ComposePT([])
-    if key == "basic":
-        return ComposePT(
-            [
-                RandomFlipRotate(max_deg=10.0, rng=rng),
-                IntensityShift(mul=(0.95, 1.05), add=(-0.02, 0.02), rng=rng),
-            ]
-        )
-    if key == "basic+elastic":
-        return ComposePT(
-            [
-                RandomFlipRotate(max_deg=7.0, rng=rng),
-                IntensityShift(mul=(0.95, 1.05), add=(-0.02, 0.02), rng=rng),
-                ElasticDeformation(alpha=12.0, sigma=6.0, rng=rng),
-            ]
-        )
-    if key == "hu+basic":
-        return ComposePT(
-            [
-                HUWindowing(center=40.0, width=400.0, input_hu_range=(0.0, 1.0)),
-                RandomFlipRotate(max_deg=10.0, rng=rng),
-                IntensityShift(mul=(0.95, 1.05), add=(-0.02, 0.02), rng=rng),
-            ]
-        )
-    if key == "dkfz-like":
-        return ComposePT(
-            [
-                RandomFlipRotate(max_deg=10.0, rng=rng),
-                RandomScale(scale=(0.9, 1.1), rng=rng),
-                ElasticDeformation(alpha=12.0, sigma=6.0, rng=rng),
-                IntensityShift(mul=(0.95, 1.05), add=(-0.02, 0.02), rng=rng),
-                GammaCorrection(gamma=(0.7, 1.5), rng=rng),
-                GaussianNoise(sigma=(0.0, 0.02), rng=rng),
-            ]
-        )
-    raise KeyError(f"Unknown augmentation preset '{name}'")
-
-
 class AugmentedDataset(torch.utils.data.Dataset):
-    """
-    Wraps SliceDataset to apply PT transforms during training.
-    Ensures masks remain strict one-hot float in [K,H,W].
-    """
+    """Wraps a dataset and applies batchgenerators augmentation on-the-fly"""
 
-    def __init__(
-        self, base_ds: SliceDataset, transform: PairTransform, K_guess: int = 5
-    ):
-        self.base = base_ds
-        self.transform = transform
-        ex = self.base[0]
-        m = ex["gts"]
-        if isinstance(m, torch.Tensor) and m.ndim == 3 and m.shape[0] > 1:
-            self.K = m.shape[0]
-        else:
-            self.K = K_guess
+    def __init__(self, base_dataset: SliceDataset, compose: BGCompose, K: int = 5):
+        self.base = base_dataset
+        self.compose = compose
+        self.K = K
 
     def __len__(self):
         return len(self.base)
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx):
         item = self.base[idx]
-        image: Tensor = item["images"].to(torch.float32)  # [1,H,W]
-        mask: Tensor = item["gts"]  # [K,H,W] or [1,H,W] labels
+        img = _to_chw_numpy(item["images"])  # [1,H,W]
+        gt = item["gts"]
 
-        # Normalize mask to one-hot float [K,H,W]
-        if isinstance(mask, torch.Tensor):
-            if mask.ndim == 3 and mask.shape[0] > 1:
-                mask_oh = mask.to(torch.float32)
+        # Convert to one-hot numpy if needed
+        if isinstance(gt, torch.Tensor):
+            if gt.ndim == 3 and gt.shape[0] > 1:
+                seg = gt.detach().cpu().to(torch.float32).numpy()
             else:
-                labels = mask.to(torch.long)  # [1,H,W]
-                mask_oh = class2one_hot(labels, K=self.K)[0].to(torch.float32)
+                lbl = gt.detach().cpu().to(torch.long).numpy()
+                seg = _labels_to_onehot(lbl, self.K)
         else:
-            arr = np.asarray(mask)
-            if arr.ndim == 3 and arr.shape[0] > 1:
-                mask_oh = torch.from_numpy(arr.astype(np.float32))
-            else:
-                onehot = np.eye(self.K, dtype=np.float32)[arr.astype(np.int64)]
-                mask_oh = torch.from_numpy(np.transpose(onehot, (2, 0, 1)))
+            gt = np.asarray(gt)
+            seg = _labels_to_onehot(gt, self.K)
 
-        img_t, msk_t = self.transform(image, mask_oh)
+        # Apply batchgenerators augmentation
+        if len(self.compose.transforms) > 0:
+            # Add batch dimension
+            batch_dict = {
+                "data": img[None, ...],  # [1,1,H,W]
+                "seg": seg[None, ...],  # [1,K,H,W]
+            }
 
-        # Re-quantize mask to strict one-hot after any warp
-        hard = msk_t.argmax(dim=0, keepdim=True).to(torch.long)  # [1,H,W]
-        msk_t = _labels_to_onehot(hard, self.K)  # [K,H,W] float
+            # Apply transforms
+            for transform in self.compose.transforms:
+                batch_dict = transform(**batch_dict)
 
-        out = dict(item)
-        out["images"] = torch.clamp(img_t, 0, 1)
-        out["gts"] = msk_t
-        return out
+            # Remove batch dimension
+            img = batch_dict["data"][0]
+            seg = batch_dict["seg"][0]
 
+        # Convert back to torch tensors
+        img_t = torch.from_numpy(img).float()
+        seg_t = torch.from_numpy(seg).float()
 
-# =============================================================================
-# Public API for main.py
-# =============================================================================
+        return {"images": img_t, "gts": seg_t}
 
 
 def add_augmentation_cli(parser: argparse.ArgumentParser) -> None:
@@ -635,12 +393,34 @@ def add_augmentation_cli(parser: argparse.ArgumentParser) -> None:
 
 
 def wrap_train_dataset_if_needed(
-    train_set: SliceDataset, args
+    train_set: SliceDataset, args, patch_shape: Optional[Tuple[int, int]] = None
 ) -> torch.utils.data.Dataset:
+    """Wrap dataset with batchgenerators augmentation if specified"""
     aug_name = getattr(args, "aug", "none")
+
     if aug_name and aug_name != "none":
-        tfm = _build_pt_preset(aug_name, seed=getattr(args, "aug_seed", None))
-        return AugmentedDataset(train_set, tfm)
+        # Set seed if specified
+        aug_seed = getattr(args, "aug_seed", None)
+        if aug_seed is not None:
+            np.random.seed(aug_seed)
+
+        # Get patch shape from dataset if not provided
+        if patch_shape is None:
+            first = train_set[0]
+            img = first["images"]
+            if isinstance(img, torch.Tensor):
+                H, W = img.shape[-2:]
+            else:
+                img = np.asarray(img)
+                H, W = img.shape[-2:]
+            patch_shape = (H, W)
+
+        # Build compose
+        compose = preset_compose(aug_name, patch_shape)
+
+        # Wrap dataset
+        return AugmentedDataset(train_set, compose, K=5)
+
     return train_set
 
 
@@ -657,15 +437,15 @@ def save_aug_examples(
     dest = Path(dest) / "aug_examples"
     dest.mkdir(parents=True, exist_ok=True)
 
-    # If dataset is already augmented, extract its base and transform;
+    # If dataset is already augmented, extract its base and compose;
     # else, preview without transform (orig only).
     if isinstance(dataset, AugmentedDataset):
         base = dataset.base
-        transform = dataset.transform
+        compose = dataset.compose
         K = dataset.K
     else:
         base = dataset
-        transform = None
+        compose = None
         # try to infer K
         ex = base[0]["gts"]
         K = (
@@ -676,46 +456,51 @@ def save_aug_examples(
 
     for idx in range(min(n_samples, len(base))):
         item = base[idx]
-        img = item["images"].to(torch.float32)  # [1,H,W]
+        img = _to_chw_numpy(item["images"])  # [1,H,W]
         gt = item["gts"]
+
+        # Convert to one-hot
         if isinstance(gt, torch.Tensor):
             if gt.ndim == 3 and gt.shape[0] > 1:
-                m_oh = gt.to(torch.float32)
+                m_oh = gt.detach().cpu().to(torch.float32).numpy()
             else:
-                m_oh = class2one_hot(gt.to(torch.long)[None, ...], K=K)[0].to(
-                    torch.float32
-                )
+                lbl = gt.detach().cpu().to(torch.long).numpy()
+                m_oh = _labels_to_onehot(lbl, K)
         else:
-            arr = np.asarray(gt)
-            if arr.ndim == 3 and arr.shape[0] > 1:
-                m_oh = torch.from_numpy(arr.astype(np.float32))
-            else:
-                onehot = np.eye(K, dtype=np.float32)[arr.astype(np.int64)]
-                m_oh = torch.from_numpy(np.transpose(onehot, (2, 0, 1)))
+            gt = np.asarray(gt)
+            m_oh = _labels_to_onehot(gt, K)
 
         # save original
-        _save_png(img.detach().cpu().numpy(), dest / f"sample{idx:02d}_orig.png")
+        _save_png(img, dest / f"sample{idx:02d}_orig.png")
 
         # overlay orig mask for reference
-        mask_rgb = _colorize_labels(m_oh.detach().cpu().numpy())
-        rgb = np.repeat(img.detach().cpu().numpy(), 3, axis=0)
+        mask_rgb = _colorize_labels(m_oh)
+        rgb = np.repeat(img, 3, axis=0)
         overlay = (rgb * 0.6 + mask_rgb * 0.4).astype(np.float32)
         _save_png(overlay, dest / f"sample{idx:02d}_orig_overlay.png")
 
         # save a few augmentations
-        if transform is not None:
+        if compose is not None and len(compose.transforms) > 0:
             for j in range(n_augments):
-                img_aug, msk_aug = transform(img, m_oh)
+                # Apply augmentation
+                batch_dict = {
+                    "data": img[None, ...],  # [1,1,H,W]
+                    "seg": m_oh[None, ...],  # [1,K,H,W]
+                }
+
+                for transform in compose.transforms:
+                    batch_dict = transform(**batch_dict)
+
+                img_aug = batch_dict["data"][0]
+                msk_aug = batch_dict["seg"][0]
+
                 # re-quantize to one-hot for clean visualization
-                hard = msk_aug.argmax(dim=0, keepdim=True).to(torch.long)
-                msk_aug = _labels_to_onehot(hard, K)
+                labels = np.argmax(msk_aug, axis=0)
+                msk_aug = _labels_to_onehot(labels, K)
 
-                _save_png(
-                    img_aug.detach().cpu().numpy(),
-                    dest / f"sample{idx:02d}_aug{j:02d}.png",
-                )
+                _save_png(img_aug, dest / f"sample{idx:02d}_aug{j:02d}.png")
 
-                m_rgb = _colorize_labels(msk_aug.detach().cpu().numpy())
-                rgbA = np.repeat(img_aug.detach().cpu().numpy(), 3, axis=0)
+                m_rgb = _colorize_labels(msk_aug)
+                rgbA = np.repeat(img_aug, 3, axis=0)
                 overlayA = (rgbA * 0.6 + m_rgb * 0.4).astype(np.float32)
                 _save_png(overlayA, dest / f"sample{idx:02d}_aug{j:02d}_overlay.png")
