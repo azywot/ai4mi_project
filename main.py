@@ -217,7 +217,7 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
         debug=args.debug,
     )
     train_set = wrap_train_dataset_if_needed(
-        train_set, args, K=K
+        train_set, args
     )  # Add augmentation if specified
 
     if args.aug != "none":
