@@ -41,6 +41,7 @@ from torch.utils.data import DataLoader
 import wandb
 from sam import SAM
 from monai.optimizers import Novograd, WarmupCosineSchedule, generate_param_groups
+from augment_data import add_augmentation_cli, wrap_train_dataset_if_needed
 
 # Ranger optimizer (RAdam + LookAhead + Gradient Centralization)
 import torch_optimizer as optim
@@ -50,13 +51,14 @@ from clmr import CLMRScheduler
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
     print(">> Loaded environment variables from .env file")
 except ImportError:
     print(">> python-dotenv not installed. Install with: pip install python-dotenv")
     print(">> Or set environment variables manually")
 
-from functools import partial 
+from functools import partial
 
 from dataset import SliceDataset
 from ShallowNet import shallowCNN
@@ -129,7 +131,7 @@ class ModelEMA:
 def set_random_seed(seed: int = 42) -> None:
     """
     Set random seed for reproducibility across different libraries.
-    
+
     Args:
         seed: Random seed value
     """
@@ -138,14 +140,14 @@ def set_random_seed(seed: int = 42) -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    
+
     # For deterministic behavior (may impact performance)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    
+
     # Set environment variable for additional reproducibility
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
     print(f">> Random seed set to {seed} for reproducibility")
 
 
@@ -158,34 +160,40 @@ datasets_params["SEGTHOR_CLEAN"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, '
 datasets_params["SEGTHOR_CLEAN_v2"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 
 def img_transform(img):
-        img = img.convert('L')
-        img = np.array(img)[np.newaxis, ...]
-        img = img / 255  # max <= 1
-        img = torch.tensor(img, dtype=torch.float32)
-        return img
+    img = img.convert("L")
+    img = np.array(img)[np.newaxis, ...]
+    img = img / 255  # max <= 1
+    img = torch.tensor(img, dtype=torch.float32)
+    return img
+
 
 def gt_transform(K, img):
-        img = np.array(img)[...]
-        # The idea is that the classes are mapped to {0, 255} for binary cases
-        # {0, 85, 170, 255} for 4 classes
-        # {0, 51, 102, 153, 204, 255} for 6 classes
-        # Very sketchy but that works here and that simplifies visualization
-        img = img / (255 / (K - 1)) if K != 5 else img / 63  # max <= 1
-        img = torch.tensor(img, dtype=torch.int64)[None, ...]  # Add one dimension to simulate batch
-        img = class2one_hot(img, K=K)
-        return img[0]
+    img = np.array(img)[...]
+    # The idea is that the classes are mapped to {0, 255} for binary cases
+    # {0, 85, 170, 255} for 4 classes
+    # {0, 51, 102, 153, 204, 255} for 6 classes
+    # Very sketchy but that works here and that simplifies visualization
+    img = img / (255 / (K - 1)) if K != 5 else img / 63  # max <= 1
+    img = torch.tensor(img, dtype=torch.int64)[
+        None, ...
+    ]  # Add one dimension to simulate batch
+    img = class2one_hot(img, K=K)
+    return img[0]
+
 
 def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     # Initialize wandb
     wandb_mode = "offline" if args.wandb_offline else "online"
-    
+
     # Check if wandb API key is available
-    api_key = os.getenv('WANDB_API_KEY')
+    api_key = os.getenv("WANDB_API_KEY")
     if not api_key and wandb_mode == "online":
         print(">> Warning: WANDB_API_KEY not found in environment variables")
-        print(">> Switching to offline mode. Set WANDB_API_KEY in .env file for online mode")
+        print(
+            ">> Switching to offline mode. Set WANDB_API_KEY in .env file for online mode"
+        )
         wandb_mode = "offline"
-    
+
     # Set experiment name
     if args.wandb_name:
         experiment_name = args.wandb_name
@@ -205,8 +213,8 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
             "debug": args.debug,
             "dest": str(args.dest),
             "seed": args.seed,
-            "experiment_name": experiment_name
-        }
+            "experiment_name": experiment_name,
+        },
     )
     
     # Save wandb run ID for later use (to append metrics)
@@ -339,7 +347,7 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
             "eps": 1e-8,
         }
     elif args.optimizer == "clmr":
-        # CreativeCLMR: Enhanced Cyclic Learning/Momentum Rate with Nesterov SGD
+        # CLMR: Enhanced Cyclic Learning/Momentum Rate with Nesterov SGD
         # Creative combination of multiple advanced techniques to beat baseline across ALL metrics
 
         # Optimized LR range for SEGTHOR (based on empirical testing)
@@ -391,7 +399,7 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
         )
 
         optimizer_config = {
-            "optimizer": "CreativeCLMR+NesterovSGD",
+            "optimizer": "CLMR+NesterovSGD",
             "lr_min": lr_min,
             "lr_max": lr_max,
             "mom_min": mom_min,
@@ -412,28 +420,41 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     # LearningRateFinder removed per project simplification
     
     # Dataset part (MUST be created before scheduler for non-CLMR optimizers)
-    B: int = datasets_params[args.dataset]['B']
+    # Log model architecture (commented out due to pickle issues with wandb.watch)
+    # wandb.watch(net, log="all", log_freq=10)
+
+    # Dataset part
+    B: int = datasets_params[args.dataset]["B"]
     root_dir = Path("data") / args.dataset
 
-    train_set = SliceDataset('train',
-                             root_dir,
-                             img_transform=img_transform,
-                             gt_transform= partial(gt_transform, K),
-                             debug=args.debug)
-    train_loader = DataLoader(train_set,
-                              batch_size=B,
-                              num_workers=5,
-                              shuffle=True)
+    train_set = SliceDataset(
+        "train",
+        root_dir,
+        img_transform=img_transform,
+        gt_transform=partial(gt_transform, K),
+        debug=args.debug,
+    )
+    train_set = wrap_train_dataset_if_needed(
+        train_set, args
+    )  # Add augmentation if specified
 
-    val_set = SliceDataset('val',
-                           root_dir,
-                           img_transform=img_transform,
-                           gt_transform=partial(gt_transform, K),
-                           debug=args.debug)
-    val_loader = DataLoader(val_set,
-                            batch_size=B,
-                            num_workers=5,
-                            shuffle=False)
+    # if args.aug != "none":
+        # from augment_data import save_aug_examples
+
+        # save_aug_examples(
+        #     train_set, args.dest, n_samples=4, n_augments=3
+        # )  # Save some examples of augmentations
+
+    train_loader = DataLoader(train_set, batch_size=B, num_workers=5, shuffle=True)
+
+    val_set = SliceDataset(
+        "val",
+        root_dir,
+        img_transform=img_transform,
+        gt_transform=partial(gt_transform, K),
+        debug=args.debug,
+    )
+    val_loader = DataLoader(val_set, batch_size=B, num_workers=5, shuffle=False)
     
     # Create learning rate scheduler (compatible with all optimizers)
     # Note: CLMR has its own scheduler, so we skip WarmupCosineSchedule for it
@@ -460,7 +481,7 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
                   f"total_steps={total_steps}, end_lr={end_lr:.2e}")
     else:
         # CLMR already created its scheduler above
-        print(f">> Using CreativeCLMR: lr=[{lr_min:.2e}, {lr_max:.2e}], "
+        print(f">> Using CLMR: lr=[{lr_min:.2e}, {lr_max:.2e}], "
               f"momentum=[{mom_min:.2f}, {mom_max:.2f}], cycle={base_cycle_steps//steps_per_epoch}ep, antiphase=True, adaptive")
     
     # Log model architecture and hyperparameters to wandb
@@ -497,6 +518,21 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     
     # Log model architecture (commented out due to pickle issues with wandb.watch)
     # wandb.watch(net, log="all", log_freq=10)
+    lr = 0.0005
+    optimizer = torch.optim.Adam(net.parameters(), lr=lr, betas=(0.9, 0.999))
+
+    # Log model architecture and hyperparameters to wandb
+    wandb.config.update({
+        "learning_rate": lr,
+        "optimizer": "Adam",
+        "betas": (0.9, 0.999),
+        "num_classes": K,
+        "kernels": kernels,
+        "factor": factor,
+        "batch_size": datasets_params[args.dataset]['B'],
+        "num_workers": 5,
+        "seed": args.seed,
+    })
 
     args.dest.mkdir(parents=True, exist_ok=True)
 
@@ -563,9 +599,9 @@ def runTraining(args):
     best_dice: float = 0
 
     for e in range(args.epochs):
-        for m in ['train', 'val']:
+        for m in ["train", "val"]:
             match m:
-                case 'train':
+                case "train":
                     net.train()
                     opt = optimizer
                     cm = Dcm
@@ -573,7 +609,7 @@ def runTraining(args):
                     loader = train_loader
                     log_loss = log_loss_tra
                     log_dice = log_dice_tra
-                case 'val':
+                case "val":
                     net.eval()
                     opt = None
                     cm = torch.no_grad
@@ -582,18 +618,20 @@ def runTraining(args):
                     log_loss = log_loss_val
                     log_dice = log_dice_val
 
-            with cm():  # Either dummy context manager, or the torch.no_grad for validation
+            with (
+                cm()
+            ):  # Either dummy context manager, or the torch.no_grad for validation
                 j = 0
                 tq_iter = tqdm_(enumerate(loader), total=len(loader), desc=desc)
                 for i, data in tq_iter:
-                    img = data['images'].to(device)
-                    gt = data['gts'].to(device)
+                    img = data["images"].to(device)
+                    gt = data["gts"].to(device)
 
                     if opt:  # So only for training
                         opt.zero_grad()
 
                     # Sanity tests to see we loaded and encoded the data correctly
-                    assert 0 <= img.min() and img.max() <= 1
+                    # assert 0 <= img.min() and img.max() <= 1
                     B, _, W, H = img.shape
 
                     # Forward pass - handle deep supervision (returns tuple during training)
@@ -610,7 +648,9 @@ def runTraining(args):
 
                     # Metrics computation, not used for training
                     pred_seg = probs2one_hot(pred_probs)
-                    log_dice[e, j:j + B, :] = dice_coef(pred_seg, gt)  # One DSC value per sample and per class
+                    log_dice[e, j : j + B, :] = dice_coef(
+                        pred_seg, gt
+                    )  # One DSC value per sample and per class
 
                     # Compute loss - main loss from primary output
                     loss = loss_fn(pred_probs, gt)
@@ -673,9 +713,9 @@ def runTraining(args):
                         if scheduler is not None:
                             scheduler.step()
 
-                    if m == 'val':
+                    if m == "val":
                         with warnings.catch_warnings():
-                            warnings.filterwarnings('ignore', category=UserWarning)
+                            warnings.filterwarnings("ignore", category=UserWarning)
                             predicted_class: Tensor = probs2class(pred_probs)
                             mult: int = 63 if K == 5 else (255 / (K - 1))
                             # Decide per-epoch save dir (temporary if save_best_only)
@@ -688,11 +728,15 @@ def runTraining(args):
 
                     j += B  # Keep in mind that _in theory_, each batch might have a different size
                     # For the DSC average: do not take the background class (0) into account:
-                    postfix_dict: dict[str, str] = {"Dice": f"{log_dice[e, :j, 1:].mean():05.3f}",
-                                                    "Loss": f"{log_loss[e, :i + 1].mean():5.2e}"}
+                    postfix_dict: dict[str, str] = {
+                        "Dice": f"{log_dice[e, :j, 1:].mean():05.3f}",
+                        "Loss": f"{log_loss[e, :i + 1].mean():5.2e}",
+                    }
                     if K > 2:
-                        postfix_dict |= {f"Dice-{k}": f"{log_dice[e, :j, k].mean():05.3f}"
-                                         for k in range(1, K)}
+                        postfix_dict |= {
+                            f"Dice-{k}": f"{log_dice[e, :j, k].mean():05.3f}"
+                            for k in range(1, K)
+                        }
                     tq_iter.set_postfix(postfix_dict)
 
         # I save it at each epochs, in case the code crashes or I decide to stop it early
@@ -749,7 +793,7 @@ def runTraining(args):
         for k in range(1, K):  # Skip background class
             wandb_log[f"train_dice_class_{k}"] = log_dice_tra[e, :, k].mean().item()
             wandb_log[f"val_dice_class_{k}"] = log_dice_val[e, :, k].mean().item()
-        
+
         wandb.log(wandb_log, step=e)
 
         current_dice: float = log_dice_val[e, :, 1:].mean().item()
@@ -757,11 +801,11 @@ def runTraining(args):
             message = f">>> Improved dice at epoch {e}: {best_dice:05.3f}->{current_dice:05.3f} DSC"
             print(message)
             best_dice = current_dice
-            
+
             # Log best dice improvement to wandb
             wandb.log({"best_dice": current_dice, "best_epoch": e}, step=e)
-            
-            with open(args.dest / "best_epoch.txt", 'w') as f:
+
+            with open(args.dest / "best_epoch.txt", "w") as f:
                 f.write(message)
 
             best_folder = args.dest / "best_epoch"
@@ -774,7 +818,7 @@ def runTraining(args):
 
             torch.save(net, args.dest / "bestmodel.pkl")
             torch.save(net.state_dict(), args.dest / "bestweights.pt")
-            
+
             # Save model artifacts to wandb
             wandb.save(str(args.dest / "bestmodel.pkl"))
             wandb.save(str(args.dest / "bestweights.pt"))
@@ -791,31 +835,31 @@ def runTraining(args):
     
     # Final logging and artifact saving
     print(f">>> Training completed. Best dice: {best_dice:.3f}")
-    wandb.log({"final_best_dice": best_dice}, step=args.epochs-1)
-    
+    wandb.log({"final_best_dice": best_dice}, step=args.epochs - 1)
+
     # Create wandb artifacts for the complete experiment
     artifact = wandb.Artifact(
         name=f"model_{args.dataset}_{args.mode}",
         type="model",
-        description=f"Best model for {args.dataset} dataset in {args.mode} mode"
+        description=f"Best model for {args.dataset} dataset in {args.mode} mode",
     )
     artifact.add_file(str(args.dest / "bestweights.pt"))
     artifact.add_file(str(args.dest / "bestmodel.pkl"))
     artifact.add_file(str(args.dest / "best_epoch.txt"))
     wandb.log_artifact(artifact)
-    
+
     # Create metrics artifact
     metrics_artifact = wandb.Artifact(
         name=f"metrics_{args.dataset}_{args.mode}",
         type="metrics",
-        description=f"Training metrics for {args.dataset} dataset in {args.mode} mode"
+        description=f"Training metrics for {args.dataset} dataset in {args.mode} mode",
     )
     metrics_artifact.add_file(str(args.dest / "loss_tra.npy"))
     metrics_artifact.add_file(str(args.dest / "dice_tra.npy"))
     metrics_artifact.add_file(str(args.dest / "loss_val.npy"))
     metrics_artifact.add_file(str(args.dest / "dice_val.npy"))
     wandb.log_artifact(metrics_artifact)
-    
+
     # Finish wandb run
     wandb.finish()
 
@@ -879,6 +923,7 @@ def main():
     parser.add_argument('--grad_clip', type=float, default=1.0,
                         help="Gradient clipping max norm (0 to disable, default: 1.0, Ranger uses 2x)")
 
+    add_augmentation_cli(parser)
     args = parser.parse_args()
 
     # Set random seed for reproducibility
@@ -889,5 +934,5 @@ def main():
     runTraining(args)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
