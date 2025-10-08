@@ -5,34 +5,39 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8GB
 #SBATCH --time=00:30:00
-#SBATCH --output=/home/scur1622/group_project/ai4mi_project/out/ranger_meta.log
+#SBATCH --output=/scratch-shared/ai4mi-group-9/ai4mi_project/out/ranger_meta.log
 
 # Change to your project directory
-cd $HOME/group_project/ai4mi_project/
+cd /scratch-shared/ai4mi-group-9/ai4mi_project
 
-# Define seeds to evaluate
-SEEDS=(42 420 37)
+# Define seeds and losses to evaluate
+#SEEDS=(42 420 37)
+#LOSSES=(ce dice cedice focal gdl tversky dicefocal monai_dice monai_gdl monai_tversky monai_dicece monai_focal monai_hausdorffdt hausdorff)
+SEEDS=(42 420)
+LOSSES=(cedice)
 echo "=========================================="
 echo "Ranger Optimizer - Meta Job Submission"
 echo "=========================================="
-echo "Submitting jobs for seeds: ${SEEDS[@]}"
+echo "Submitting jobs for seeds:  ${SEEDS[@]}"
+echo "Submitting jobs for losses: ${LOSSES[@]}"
 echo "=========================================="
 
-# Submit individual jobs for each seed
-for seed in "${SEEDS[@]}"; do
-    echo "Submitting job for seed ${seed}..."
-    
-    # Submit the single seed job with SEED environment variable
+# Submit individual jobs for each loss x seed
+for loss in "${LOSSES[@]}"; do
+  for seed in "${SEEDS[@]}"; do
+    echo "Submitting job for LOSS=${loss} SEED=${seed}..."
+
     sbatch \
-    --export=ALL,SEED=${seed} \
-    --output=out/results/ranger_seed_${seed}.log \
-    jobs/optimizer_jobs/ranger/evaluate_ranger_single_seed.job
-    
+      --export=ALL,SEED=${seed},LOSS=${loss} \
+      --output=out/results/ranger_${loss}_seed_${seed}.log \
+      jobs/optimizer_jobs/ranger/evaluate_ranger_single_seed.job
+
     if [ $? -eq 0 ]; then
-        echo "✓ Job submitted successfully for seed ${seed}"
+      echo "✓ Submitted LOSS=${loss} SEED=${seed}"
     else
-        echo "✗ Failed to submit job for seed ${seed}"
+      echo "✗ Failed LOSS=${loss} SEED=${seed}"
     fi
+  done
 done
 
 echo ""
@@ -41,7 +46,7 @@ echo "Meta Job Summary"
 echo "=========================================="
 echo "All jobs submitted for seeds: ${SEEDS[@]}"
 echo "Check job status with: squeue -u $USER"
-echo "Monitor individual job outputs in: out/results/ranger_seed_*.log"
+echo "Monitor individual job outputs in: out/results/ranger_*_seed_*.log"
 echo "=========================================="
 
 echo ""

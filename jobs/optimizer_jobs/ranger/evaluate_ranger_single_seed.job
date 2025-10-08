@@ -5,8 +5,8 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --mem=64GB
-#SBATCH --time=02:00:00
-#SBATCH --output=out/results/ranger_seed_${SEED}.log
+#SBATCH --time=04:00:00
+#SBATCH --output=/scratch-shared/ai4mi-group-9/ai4mi_project/out/results/ranger_seed_${SEED}.log
 
 module purge
 module load 2023
@@ -14,14 +14,15 @@ module load Anaconda3/2023.07-2
 module load CUDA/12.4.0
 
 # Change to your project directory
-cd $HOME/group_project/ai4mi_project/
+cd /scratch-shared/ai4mi-group-9/ai4mi_project
 source ai4mi/bin/activate
 
 # Set wandb online
 wandb online
 
-# Get seed from environment variable
+# Get parameters from environment variables
 SEED=${SEED}
+LOSS=${LOSS}
 OPTIMIZER="ranger"
 
 echo "=========================================="
@@ -29,21 +30,22 @@ echo "Ranger Optimizer - Single Seed Training & Evaluation"
 echo "=========================================="
 echo "Seed: ${SEED}"
 echo "Optimizer: ${OPTIMIZER}"
+echo "Loss: ${LOSS}"
 echo "=========================================="
 
 # Create training results directory
-mkdir -p train_results/${OPTIMIZER}
+mkdir -p train_results/${OPTIMIZER}/${LOSS}
 
 # Train model for this seed
 echo ""
-echo "Step 1: Training model for seed ${SEED}..."
+echo "Step 1: Training model for seed ${SEED} (loss=${LOSS})..."
 echo "----------------------------------------"
 
 python -O main.py \
   --dataset SEGTHOR_CLEAN \
   --mode full \
   --epochs 25 \
-  --dest train_results/${OPTIMIZER}/train_results_baseline_${SEED} \
+  --dest train_results/${OPTIMIZER}/${LOSS}/seed_${SEED} \
   --gpu \
   --wandb_entity ai4med-team \
   --wandb_project final-project \
@@ -51,7 +53,8 @@ python -O main.py \
   --optimizer ranger \
   --use_scheduler \
   --grad_clip 0.5 \
-  --wandb_name "ranger_seed_${SEED}"
+  --loss ${LOSS} \
+  --wandb_name "ranger_${LOSS}_seed_${SEED}"
 
 if [ $? -eq 0 ]; then
     echo "✓ Training completed for seed ${SEED}"
@@ -92,19 +95,19 @@ echo "Step 4: Stitching predictions for seed ${SEED}..."
 echo "------------------------------------------------"
 
 # Check if source directory exists
-source_dir="train_results/${OPTIMIZER}/train_results_baseline_${SEED}/best_epoch/val"
+source_dir="train_results/${OPTIMIZER}/${LOSS}/seed_${SEED}/best_epoch/val"
 if [ ! -d "$source_dir" ]; then
     echo "Error: Source directory $source_dir does not exist"
     exit 1
 fi
 
 # Create seed-specific directory
-mkdir -p evaluation_results/${OPTIMIZER}/stitched_predictions/seed_${SEED}
+mkdir -p evaluation_results/${OPTIMIZER}/stitched_predictions/${LOSS}/seed_${SEED}
 
 # Stitch predictions
 python stitch.py \
   --data_folder "$source_dir" \
-  --dest_folder evaluation_results/${OPTIMIZER}/stitched_predictions/seed_${SEED} \
+  --dest_folder evaluation_results/${OPTIMIZER}/stitched_predictions/${LOSS}/seed_${SEED} \
   --num_classes 5 \
   --grp_regex "(Patient_\d\d)_\d\d\d\d" \
   --source_scan_pattern "data/segthor_train/train/{id_}/GT.nii.gz"
@@ -122,35 +125,37 @@ echo "Step 5: Computing metrics for seed ${SEED}..."
 echo "---------------------------------------------"
 
 # Check if stitched predictions exist
-pred_dir="evaluation_results/${OPTIMIZER}/stitched_predictions/seed_${SEED}"
+pred_dir="evaluation_results/${OPTIMIZER}/stitched_predictions/${LOSS}/seed_${SEED}"
 if [ ! -d "$pred_dir" ] || [ -z "$(ls -A $pred_dir 2>/dev/null)" ]; then
     echo "Error: No stitched predictions found for seed ${SEED}"
     exit 1
 fi
 
 # Create seed-specific metrics directory
-mkdir -p evaluation_results/${OPTIMIZER}/metrics/seed_${SEED}
+mkdir -p evaluation_results/${OPTIMIZER}/metrics/${LOSS}/seed_${SEED}
 
 # Compute metrics
-python /home/scur1622/group_project/ai4mi_project/distorch/compute_metrics.py \
+python /scratch-shared/ai4mi-group-9/ai4mi_project/distorch/compute_metrics.py \
   --ref_folder evaluation_results/${OPTIMIZER}/ground_truth \
   --pred_folder "$pred_dir" \
   --ref_extension .nii.gz \
   --pred_extension .nii.gz \
   --num_classes 5 \
   --metrics 3d_dice 3d_hd95 3d_jaccard 3d_assd \
-  --save_folder evaluation_results/${OPTIMIZER}/metrics/seed_${SEED} \
-  --overwrite
+  --save_folder evaluation_results/${OPTIMIZER}/metrics/${LOSS}/seed_${SEED} \
+  --overwrite \
+  --chill
 
 if [ $? -eq 0 ]; then
     echo "✓ Metrics computation completed for seed ${SEED}"
     
     # Log metrics to wandb using separate Python script
     echo "Logging metrics to wandb..."
-    python /home/scur1622/group_project/ai4mi_project/jobs/optimizer_jobs/adamW/log_metrics_to_wandb.py \
+    python /scratch-shared/ai4mi-group-9/ai4mi_project/jobs/optimizer_jobs/adamW/log_metrics_to_wandb.py \
       --seed ${SEED} \
       --optimizer ${OPTIMIZER} \
-      --metrics_dir evaluation_results/${OPTIMIZER}/metrics/seed_${SEED}
+      --loss ${LOSS} \
+      --metrics_dir evaluation_results/${OPTIMIZER}/metrics/${LOSS}/seed_${SEED}
 else
     echo "✗ Metrics computation failed for seed ${SEED}"
     exit 1
@@ -162,8 +167,8 @@ echo "Evaluation Summary for Seed ${SEED}"
 echo "=========================================="
 echo "Results saved in: evaluation_results/${OPTIMIZER}/"
 echo "Ground truth: evaluation_results/${OPTIMIZER}/ground_truth/"
-echo "Stitched predictions: evaluation_results/${OPTIMIZER}/stitched_predictions/seed_${SEED}/"
-echo "Metrics: evaluation_results/${OPTIMIZER}/metrics/seed_${SEED}/"
+echo "Stitched predictions: evaluation_results/${OPTIMIZER}/stitched_predictions/${LOSS}/seed_${SEED}/"
+echo "Metrics: evaluation_results/${OPTIMIZER}/metrics/${LOSS}/seed_${SEED}/"
 echo "=========================================="
 
 echo ""

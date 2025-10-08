@@ -136,7 +136,10 @@ def main():
     parser = argparse.ArgumentParser(description="Summarize optimizer results across seeds")
     parser.add_argument("--optimizer",
                        required=True,
-                       help="Optimizer name (e.g., sam, adamw, sgd)")
+                       help="Optimizer name (e.g., sam, adamw, sgd, ranger)")
+    parser.add_argument("--loss",
+                       default=None,
+                       help="Loss function name (for ranger optimizer only, e.g., ce, dice, cedice)")
     parser.add_argument("--results_dir", 
                        default=None, 
                        help="Directory containing training results (default: train_results/<optimizer>)")
@@ -147,7 +150,7 @@ def main():
                        default=None,
                        help="Output CSV file for comparison with baseline (default: evaluation_results/<optimizer>/comparison_with_baseline.csv)")
     parser.add_argument("--baseline_file",
-                       default="/home/scur1622/group_project/ai4mi_project/train_results/baseline_per_class_stats.csv",
+                       default="/scratch-shared/ai4mi-group-9/ai4mi_project/train_results/baseline_per_class_stats.csv",
                        help="Baseline per-class stats file")
     parser.add_argument("--seeds", 
                        nargs="+", 
@@ -158,18 +161,33 @@ def main():
     args = parser.parse_args()
     
     optimizer = args.optimizer
+    loss = args.loss
     seeds = args.seeds
     
-    # Set default paths based on optimizer name
+    # Set default paths based on optimizer name and loss (if applicable)
     if args.results_dir is None:
-        args.results_dir = f"/home/scur1622/group_project/ai4mi_project/train_results/{optimizer}"
+        if loss:
+            args.results_dir = f"/scratch-shared/ai4mi-group-9/ai4mi_project/train_results/{optimizer}/{loss}"
+        else:
+            args.results_dir = f"/scratch-shared/ai4mi-group-9/ai4mi_project/train_results/{optimizer}"
+    
     if args.output_file is None:
-        args.output_file = f"/home/scur1622/group_project/ai4mi_project/evaluation_results/{optimizer}/per_class_stats.csv"
+        if loss:
+            args.output_file = f"/scratch-shared/ai4mi-group-9/ai4mi_project/evaluation_results/{optimizer}/{loss}_per_class_stats.csv"
+        else:
+            args.output_file = f"/scratch-shared/ai4mi-group-9/ai4mi_project/evaluation_results/{optimizer}/per_class_stats.csv"
+    
     if args.comparison_file is None:
-        args.comparison_file = f"/home/scur1622/group_project/ai4mi_project/evaluation_results/{optimizer}/comparison_with_baseline.csv"
+        if loss:
+            args.comparison_file = f"/scratch-shared/ai4mi-group-9/ai4mi_project/evaluation_results/{optimizer}/{loss}_comparison_with_baseline.csv"
+        else:
+            args.comparison_file = f"/scratch-shared/ai4mi-group-9/ai4mi_project/evaluation_results/{optimizer}/comparison_with_baseline.csv"
     
     print("="*60)
-    print(f"{optimizer.upper()} Optimizer - Results Summary")
+    if loss:
+        print(f"{optimizer.upper()} Optimizer with {loss.upper()} Loss - Results Summary")
+    else:
+        print(f"{optimizer.upper()} Optimizer - Results Summary")
     print("="*60)
     print(f"Summarizing results for seeds: {seeds}")
     
@@ -178,7 +196,10 @@ def main():
     
     for seed in seeds:
         # Look for metrics in evaluation_results location
-        eval_metrics_dir = Path(f"/home/scur1622/group_project/ai4mi_project/evaluation_results/{optimizer}/metrics") / f"seed_{seed}"
+        if loss:
+            eval_metrics_dir = Path(f"/scratch-shared/ai4mi-group-9/ai4mi_project/evaluation_results/{optimizer}/metrics/{loss}") / f"seed_{seed}"
+        else:
+            eval_metrics_dir = Path(f"/scratch-shared/ai4mi-group-9/ai4mi_project/evaluation_results/{optimizer}/metrics") / f"seed_{seed}"
         
         metrics_dir = None
         if eval_metrics_dir.exists():

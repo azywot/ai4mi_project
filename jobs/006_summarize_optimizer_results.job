@@ -5,14 +5,14 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=00:30:00
-#SBATCH --output=/home/scur1622/group_project/ai4mi_project/out/optimizer_results.log
+#SBATCH --output=/scratch-shared/ai4mi-group-9/ai4mi_project/out/optimizer_results.log
 
 module purge
 module load 2023
 module load Anaconda3/2023.07-2
 
 # Change to your project directory
-cd $HOME/group_project/ai4mi_project/
+cd /scratch-shared/ai4mi-group-9/ai4mi_project/
 
 # Activate the virtual environment
 source ai4mi/bin/activate
@@ -21,12 +21,35 @@ echo "=========================================="
 echo "Summarizing optimizer results"
 echo "=========================================="
 
-optimizers=("adamw" "sam" "novograd" "ranger" "clmr")
+optimizers=("adamw" "sam" "novograd" "clmr" "ranger")
 
+# Process all optimizers, checking for loss subfolders
 for opt in "${optimizers[@]}"; do
   echo "Summarizing optimizer results for ${opt^} optimizer..."
-  python /home/scur1622/group_project/ai4mi_project/jobs/optimizer_jobs/summarize_optimizer_results.py \
-    --optimizer "$opt"
+  
+  # Check if optimizer has loss subfolders
+  if [ -d "/scratch-shared/ai4mi-group-9/ai4mi_project/train_results/$opt" ]; then
+    # Get list of loss subfolders (exclude baseline folders)
+    loss_folders=$(find "/scratch-shared/ai4mi-group-9/ai4mi_project/train_results/$opt" -maxdepth 1 -type d -name "*" | grep -v "train_results_baseline" | grep -v "^/scratch-shared/ai4mi-group-9/ai4mi_project/train_results/$opt$" | sed "s|/scratch-shared/ai4mi-group-9/ai4mi_project/train_results/$opt/||")
+    
+    if [ -n "$loss_folders" ]; then
+      echo "  Found loss subfolders: $loss_folders"
+      # Process each loss subfolder
+      for loss in $loss_folders; do
+        echo "  Processing ${opt^} + ${loss}..."
+        python /scratch-shared/ai4mi-group-9/ai4mi_project/jobs/optimizer_jobs/summarize_optimizer_results.py \
+          --optimizer "$opt" \
+          --loss "$loss"
+      done
+    else
+      echo "  No loss subfolders found, processing as regular optimizer..."
+      python /scratch-shared/ai4mi-group-9/ai4mi_project/jobs/optimizer_jobs/summarize_optimizer_results.py \
+        --optimizer "$opt"
+    fi
+  else
+    echo "  Optimizer directory not found, skipping..."
+  fi
+  echo ""
 done
   
 echo "=========================================="
