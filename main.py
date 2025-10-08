@@ -39,7 +39,14 @@ from torch import nn, Tensor
 from torchvision import transforms
 from torch.utils.data import DataLoader
 import wandb
+from sam import SAM
+from monai.optimizers import Novograd, WarmupCosineSchedule, generate_param_groups
 
+# Ranger optimizer (RAdam + LookAhead + Gradient Centralization)
+import torch_optimizer as optim
+
+# CLMR (Cyclic Learning/Momentum Rate) for Nesterov SGD
+from clmr import CLMRScheduler
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
@@ -89,7 +96,36 @@ MODEL_CLASSES = {
     'TransUNetMid': TransUNetMid,
 }
 
+class ModelEMA:
+    """
+    Exponential Moving Average of model parameters.
+    Keeps a moving averaged copy of the model to improve generalization.
+    """
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.decay = decay
+        # Shadow parameters on CPU in fp32
+        self.shadow_params = {k: v.detach().cpu().float().clone() for k, v in model.state_dict().items()}
+        self.backup_params = None
 
+    @torch.no_grad()
+    def update(self, model: nn.Module) -> None:
+        for name, param in model.state_dict().items():
+            if name in self.shadow_params:
+                self.shadow_params[name].mul_(self.decay).add_(param.detach().cpu().float(), alpha=1.0 - self.decay)
+
+    @torch.no_grad()
+    def store(self, model: nn.Module) -> None:
+        self.backup_params = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+    @torch.no_grad()
+    def copy_to(self, model: nn.Module) -> None:
+        model.load_state_dict(self.shadow_params, strict=False)
+
+    @torch.no_grad()
+    def restore(self, model: nn.Module) -> None:
+        if self.backup_params is not None:
+            model.load_state_dict(self.backup_params, strict=False)
+            self.backup_params = None
 def set_random_seed(seed: int = 42) -> None:
     """
     Set random seed for reproducibility across different libraries.
@@ -203,30 +239,181 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     print(f">> Created {MODEL_CLASSES[args.model_class].__name__} with {num_params:,} trainable parameters")
     print(net)
 
-    lr = 0.0005
-    optimizer = torch.optim.Adam(net.parameters(), lr=lr, betas=(0.9, 0.999))
-    
-    # Log model architecture and hyperparameters to wandb
-    wandb.config.update({
-        "learning_rate": lr,
-        "optimizer": "Adam",
-        "betas": (0.9, 0.999),
-        "num_classes": K,
-        "kernels": kernels,
-        "factor": factor,
-        "batch_size": datasets_params[args.dataset]['B'],
-        "num_workers": 5,
-        "seed": args.seed,
-    })
-    
-    # Log model architecture (commented out due to pickle issues with wandb.watch)
-    # wandb.watch(net, log="all", log_freq=10)
+    # Initialize optimizer based on args with appropriate learning rates
+    if args.optimizer == "adamw":
+        lr = 0.0005
+        optimizer = torch.optim.AdamW(net.parameters(), lr=lr, betas=(0.9, 0.999))
+        optimizer_config = {
+            "optimizer": "AdamW",
+            "betas": (0.9, 0.999),
+        }
+    elif args.optimizer == "sam":
+        lr = 0.01  # SAM with SGD needs higher LR than AdamW
+        base_optimizer = torch.optim.SGD
+        optimizer = SAM(net.parameters(), base_optimizer, lr=lr, momentum=0.9, rho=0.05)
+        optimizer_config = {
+            "optimizer": "SAM",
+            "base_optimizer": "SGD",
+            "momentum": 0.9,
+            "rho": 0.05,
+        }
+    elif args.optimizer == "novograd":
+        lr = 0.001  # Base learning rate for Novograd
+        
+        if args.use_layer_wise_lr:
+            # Use layer-wise learning rates as recommended in MONAI docs
+            # Different learning rates for encoder and decoder parts
+            print(">> Using layer-wise learning rates for Novograd")
+            
+            # Create parameter groups with different learning rates
+            # For ENet: initial layers, encoder layers, decoder layers
+            param_groups = generate_param_groups(
+                network=net,
+                layer_matches=[
+                    # Initial layers: conv0, maxpool0, bottleneck1_0
+                    lambda x: nn.ModuleList([x.conv0, x.maxpool0, x.bottleneck1_0]) if hasattr(x, 'conv0') else nn.ModuleList(),
+                    # Encoder layers: bottleneck1_1, bottleneck2_0, bottleneck2_1, bottleneck3
+                    lambda x: nn.ModuleList([x.bottleneck1_1, x.bottleneck2_0, x.bottleneck2_1, x.bottleneck3]) if hasattr(x, 'bottleneck1_1') else nn.ModuleList(),
+                ],
+                match_types=["select", "select"],
+                lr_values=[lr * 0.5, lr * 0.75],  # Lower LR for early layers
+                include_others=True  # Include decoder/output with base LR
+            )
+            
+            optimizer = Novograd(
+                param_groups,
+                lr=lr,  # Base LR for remaining layers
+                betas=(0.9, 0.98),
+                weight_decay=0.001,
+                grad_averaging=False,
+                amsgrad=False
+            )
+            optimizer_config = {
+                "optimizer": "Novograd",
+                "betas": (0.9, 0.98),
+                "weight_decay": 0.001,
+                "grad_averaging": False,
+                "amsgrad": False,
+                "layer_wise_lr": True,
+                "lr_initial": lr * 0.5,
+                "lr_encoder": lr * 0.75,
+                "lr_decoder": lr,  # Base LR for decoder/remaining layers
+            }
+        else:
+            # Simple Novograd configuration without layer-wise LR
+            optimizer = Novograd(
+                net.parameters(),
+                lr=lr,
+                betas=(0.9, 0.98),
+                weight_decay=0.001,
+                grad_averaging=False,
+                amsgrad=False
+            )
+            optimizer_config = {
+                "optimizer": "Novograd",
+                "betas": (0.9, 0.98),
+                "weight_decay": 0.001,
+                "grad_averaging": False,
+                "amsgrad": False,
+                "layer_wise_lr": False,
+            }
+    elif args.optimizer == "ranger":
+        lr = 0.005  
 
-    # Dataset part
+        optimizer = optim.Ranger(
+            net.parameters(),
+            lr=lr,  # More frequent lookahead updates for better adaptation
+            weight_decay=0.01,
+            alpha=0.8,
+            k=5,
+            betas=(0.95, 0.999),
+            eps=1e-8,
+
+        )
+        optimizer_config = {
+            "optimizer": "Ranger",
+            "weight_decay": 0.01,
+            "alpha": 0.8,
+            "k": 5,
+            "betas": (0.95, 0.999),
+            "eps": 1e-8,
+        }
+    elif args.optimizer == "clmr":
+        # CreativeCLMR: Enhanced Cyclic Learning/Momentum Rate with Nesterov SGD
+        # Creative combination of multiple advanced techniques to beat baseline across ALL metrics
+
+        # Optimized LR range for SEGTHOR (based on empirical testing)
+        lr_min = 2e-5   # Conservative minimum for stability
+        lr_max = 8e-4   # Maximum that works well with SEGTHOR data
+
+        # Optimized momentum range (narrower for better stability)
+        mom_min = 0.88  # Higher minimum for better convergence
+        mom_max = 0.95  # Lower maximum for less oscillation
+
+        # Create Nesterov SGD optimizer with gradient centralization
+        lr = lr_min  # Start conservative (will ramp up)
+
+        # Enhanced SGD parameters for better performance
+        optimizer = torch.optim.SGD(
+            net.parameters(),
+            lr=lr,
+            momentum=mom_min,  # Start with lower momentum
+            nesterov=True,     # Required for CLMR
+            weight_decay=5e-5  # Lighter regularization
+        )
+
+        # Add gradient centralization for better training stability
+        # This helps with all metrics by improving gradient flow
+        for param_group in optimizer.param_groups:
+            for param in param_group['params']:
+                if param.requires_grad:
+                    param.register_hook(lambda grad: grad - grad.mean(dim=tuple(range(1, grad.dim())), keepdim=True))
+
+        # Enhanced cycle configuration
+        steps_per_epoch = len(train_loader)
+        base_cycle_steps = steps_per_epoch * 2  # 2 epochs base cycle
+
+        # Use enhanced CLMR scheduler
+        scheduler = CLMRScheduler(
+            optimizer,
+            lr_min=lr_min,
+            lr_max=lr_max,
+            base_cycle_steps=base_cycle_steps,
+            mom_min=mom_min,
+            mom_max=mom_max,
+            mom_cycle_steps=base_cycle_steps,  # Same as LR cycle
+            antiphase=True,   # Anti-phase: better exploration
+            adaptive_cycles=True,  # Adaptive cycle length
+            lookahead_steps=5,  # Lookahead mechanism for better convergence
+            gradient_centralization=True,  # Better gradient flow
+            layer_wise_lr=True,  # Different LRs for different layers
+            momentum_reset_interval=1000,  # Reset momentum periodically
+        )
+
+        optimizer_config = {
+            "optimizer": "CreativeCLMR+NesterovSGD",
+            "lr_min": lr_min,
+            "lr_max": lr_max,
+            "mom_min": mom_min,
+            "mom_max": mom_max,
+            "base_cycle_steps": base_cycle_steps,
+            "cycle_epochs": 2,  # 2 epochs per base cycle
+            "antiphase": True,
+            "adaptive_cycles": True,
+            "lookahead_steps": 5,
+            "gradient_centralization": True,
+            "layer_wise_lr": True,
+            "momentum_reset_interval": 1000,
+            "weight_decay": 5e-5,
+        }
+    else:
+        raise ValueError(f"Unknown optimizer: {args.optimizer}")
+    
+    # LearningRateFinder removed per project simplification
+    
+    # Dataset part (MUST be created before scheduler for non-CLMR optimizers)
     B: int = datasets_params[args.dataset]['B']
     root_dir = Path("data") / args.dataset
-
-
 
     train_set = SliceDataset('train',
                              root_dir,
@@ -247,16 +434,81 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
                             batch_size=B,
                             num_workers=5,
                             shuffle=False)
+    
+    # Create learning rate scheduler (compatible with all optimizers)
+    # Note: CLMR has its own scheduler, so we skip WarmupCosineSchedule for it
+    if args.optimizer != "clmr":
+        scheduler = None
+        if args.use_scheduler:
+            total_steps = args.epochs * len(train_loader)
+            # Ranger benefits from longer warmup
+            warmup_pct = 0.15 if args.optimizer == "ranger" else 0.1
+            warmup_steps = int(warmup_pct * total_steps)
+            # Less aggressive decay for Ranger to maintain exploration
+            end_lr = lr * 0.05 if args.optimizer == "ranger" else lr * 0.01
+            
+            scheduler = WarmupCosineSchedule(
+                optimizer,
+                warmup_steps=warmup_steps,
+                t_total=total_steps,
+                end_lr=end_lr,
+                cycles=0.5,
+                last_epoch=-1,
+                warmup_multiplier=0  # Start warmup from 0
+            )
+            print(f">> Using WarmupCosineSchedule: warmup_steps={warmup_steps} ({warmup_pct*100:.0f}%), "
+                  f"total_steps={total_steps}, end_lr={end_lr:.2e}")
+    else:
+        # CLMR already created its scheduler above
+        print(f">> Using CreativeCLMR: lr=[{lr_min:.2e}, {lr_max:.2e}], "
+              f"momentum=[{mom_min:.2f}, {mom_max:.2f}], cycle={base_cycle_steps//steps_per_epoch}ep, antiphase=True, adaptive")
+    
+    # Log model architecture and hyperparameters to wandb
+    wandb_config = {
+        "learning_rate": lr,
+        **optimizer_config,
+        "num_classes": K,
+        "kernels": kernels,
+        "factor": factor,
+        "batch_size": B,
+        "num_workers": 5,
+        "seed": args.seed,
+        "use_scheduler": args.use_scheduler,
+        # LR finder disabled
+        "use_layer_wise_lr": args.use_layer_wise_lr,
+        "grad_clip": args.grad_clip,
+    }
+    
+    # Log scheduler-specific config
+    if args.optimizer == "clmr":
+        wandb_config["scheduler"] = "CLMR"
+    elif scheduler is not None and args.use_scheduler:
+        wandb_config["scheduler"] = "WarmupCosineSchedule"
+        wandb_config["warmup_steps"] = warmup_steps
+        wandb_config["total_steps"] = total_steps
+        wandb_config["end_lr"] = end_lr
+        wandb_config["warmup_pct"] = warmup_pct
+    
+    # Log Ranger-specific grad clip multiplier
+    if args.optimizer == "ranger":
+        wandb_config["ranger_grad_clip_multiplier"] = 2.0
+    
+    wandb.config.update(wandb_config)
+    
+    # Log model architecture (commented out due to pickle issues with wandb.watch)
+    # wandb.watch(net, log="all", log_freq=10)
 
     args.dest.mkdir(parents=True, exist_ok=True)
 
-    return (net, optimizer, device, train_loader, val_loader, K)
+    return (net, optimizer, scheduler, device, train_loader, val_loader, K)
+
 
 
 def runTraining(args):
     print(f">>> Setting up to train on {args.dataset} with {args.mode}")
-    net, optimizer, device, train_loader, val_loader, K = setup(args)
-
+    net, optimizer, scheduler, device, train_loader, val_loader, K = setup(args)
+    # EMA for better generalization (helps metrics beyond Dice)
+    ema = ModelEMA(net, decay=0.999)
     # Determine class mask according to supervision mode
     if args.mode == "full":
         idk = list(range(K))  # Supervise both background and foreground
@@ -344,19 +596,82 @@ def runTraining(args):
                     assert 0 <= img.min() and img.max() <= 1
                     B, _, W, H = img.shape
 
-                    pred_logits = net(img)
+                    # Forward pass - handle deep supervision (returns tuple during training)
+                    output = net(img)
+                    if isinstance(output, tuple):
+                        # Deep supervision: (main_logits, aux_logits_1, aux_logits_2, ...)
+                        pred_logits = output[0]
+                        aux_outputs = output[1:]
+                    else:
+                        pred_logits = output
+                        aux_outputs = None
+                    
                     pred_probs = F.softmax(1 * pred_logits, dim=1)  # 1 is the temperature parameter
 
                     # Metrics computation, not used for training
                     pred_seg = probs2one_hot(pred_probs)
                     log_dice[e, j:j + B, :] = dice_coef(pred_seg, gt)  # One DSC value per sample and per class
 
+                    # Compute loss - main loss from primary output
                     loss = loss_fn(pred_probs, gt)
+                    
+                    # Add auxiliary losses if deep supervision is enabled (training only)
+                    if aux_outputs is not None and opt:
+                        for aux_logits in aux_outputs:
+                            aux_probs = F.softmax(1 * aux_logits, dim=1)
+                            loss += 0.3 * loss_fn(aux_probs, gt)  # Weight auxiliary losses lower
+                    
                     log_loss[e, i] = loss.item()  # One loss value per batch (averaged in the loss)
 
                     if opt:  # Only for training
                         loss.backward()
-                        opt.step()
+                         # Gradient clipping for stability - optimizer-specific thresholds
+                        if args.grad_clip > 0:
+                            # Ranger uses GC for regularization, needs less aggressive clipping
+                            if opt == optim.Ranger:
+                                clip_value = args.grad_clip * 2.0
+                            else:
+                                clip_value = args.grad_clip
+                            torch.nn.utils.clip_grad_norm_(net.parameters(), clip_value)
+                        
+                        # SAM optimizer requires two-step optimization
+                        if isinstance(opt, SAM):
+                            opt.first_step(zero_grad=True)
+                            
+                            # Second forward-backward pass
+                            output_2 = net(img)
+                            if isinstance(output_2, tuple):
+                                pred_logits_2 = output_2[0]
+                                aux_outputs_2 = output_2[1:]
+                            else:
+                                pred_logits_2 = output_2
+                                aux_outputs_2 = None
+                            
+                            pred_probs_2 = F.softmax(1 * pred_logits_2, dim=1)
+                            loss_2 = loss_fn(pred_probs_2, gt)
+                            
+                            # Add auxiliary losses for second pass too
+                            if aux_outputs_2 is not None:
+                                for aux_logits_2 in aux_outputs_2:
+                                    aux_probs_2 = F.softmax(1 * aux_logits_2, dim=1)
+                                    loss_2 += 0.3 * loss_fn(aux_probs_2, gt)
+                            
+                            loss_2.backward()
+                            
+                            # Gradient clipping for second pass too
+                            if args.grad_clip > 0:
+                                clip_value = args.grad_clip * 2.0 if opt == optim.Ranger else args.grad_clip
+                                torch.nn.utils.clip_grad_norm_(net.parameters(), clip_value)
+                            
+                            opt.second_step(zero_grad=True)
+                        else:
+                            opt.step()
+                            # Update EMA after optimizer step
+                            ema.update(net)
+                        
+                        # Update learning rate scheduler if present
+                        if scheduler is not None:
+                            scheduler.step()
 
                     if m == 'val':
                         with warnings.catch_warnings():
@@ -391,15 +706,44 @@ def runTraining(args):
         val_loss_epoch = log_loss_val[e, :].mean().item()
         train_dice_epoch = log_dice_tra[e, :, 1:].mean().item()  # Exclude background class
         val_dice_epoch = log_dice_val[e, :, 1:].mean().item()   # Exclude background class
+        # Evaluate EMA on validation for better generalization metrics
+        ema.store(net)
+        ema.copy_to(net)
+        net.eval()
+        with torch.no_grad():
+            j_eval = 0
+            for data in val_loader:
+                img = data['images'].to(device)
+                gt = data['gts'].to(device)
+                pred_logits = net(img)
+                pred_probs = F.softmax(1 * pred_logits, dim=1)
+                pred_seg = probs2one_hot(pred_probs)
+                log_dice_val[e, j_eval:j_eval + img.shape[0], :] = dice_coef(pred_seg, gt)
+                j_eval += img.shape[0]
+        ema.restore(net)
         
+        # Get current learning rate and momentum (for CLMR)
+        current_lr = optimizer.param_groups[0]['lr']
         # Log per-class dice scores
         wandb_log = {
             "epoch": e,
             "train_loss": train_loss_epoch,
             "val_loss": val_loss_epoch,
             "train_dice": train_dice_epoch,
-            "val_dice": val_dice_epoch
+            "val_dice": val_dice_epoch,
+            "learning_rate": current_lr
         }
+
+        # Log momentum and effective cycle position for CLMR
+        if args.optimizer == "clmr":
+            current_momentum = optimizer.param_groups[0].get('momentum', None)
+            if current_momentum is not None:
+                wandb_log["momentum"] = current_momentum
+        # expose LR bounds for debugging (copy from wandb config which already contains them)
+        wandb_log["clmr_lr_min"] = wandb.config.get("lr_min")
+        wandb_log["clmr_lr_max"] = wandb.config.get("lr_max")
+
+
         
         # Add per-class dice scores
         for k in range(1, K):  # Skip background class
@@ -526,6 +870,14 @@ def main():
                         help="Optional focal alpha weight for background class (if set)")
     parser.add_argument('--dicefocal_alpha_fg', type=float, default=None,
                         help="Optional focal alpha weight for foreground classes (if set)")
+    parser.add_argument('--optimizer', type=str, default='novograd', choices=['adamw', 'sam', 'novograd', 'ranger', 'clmr'],
+                        help="Optimizer to use for training (default: novograd)")
+    parser.add_argument('--use_scheduler', action='store_true', default=False,
+                        help="Use WarmupCosineSchedule learning rate scheduler")
+    parser.add_argument('--use_layer_wise_lr', action='store_true', default=False,
+                        help="Use layer-wise learning rates (different LRs for encoder/decoder) - only for Novograd")
+    parser.add_argument('--grad_clip', type=float, default=1.0,
+                        help="Gradient clipping max norm (0 to disable, default: 1.0, Ranger uses 2x)")
 
     args = parser.parse_args()
 

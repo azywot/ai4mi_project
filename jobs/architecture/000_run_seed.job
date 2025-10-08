@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --partition=gpu_a100
+#SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
-#SBATCH --job-name=TestEval_seed
+#SBATCH --job-name=TransUNet_seed
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=02:00:00
-#SBATCH --output=outfiles/test_full_%A.out
+#SBATCH --time=06:00:00
+#SBATCH --output=/scratch-shared/ai4mi-group-9/ai4mi_project/out/transunet_%A.out
 #SBATCH --hint=nomultithread
 
 set -Eeuo pipefail
@@ -14,14 +14,18 @@ trap 'echo "[ERR] Line $LINENO failed. Exiting." >&2' ERR
 # ------------------------------
 # Config (overridable via --export)
 # ------------------------------
-PROJECT_DIR="${PROJECT_DIR:-$HOME/ai4mi_project}"
-MODE="${MODE:-train}"                 # "prep" or "train"
+PROJECT_DIR="${PROJECT_DIR:-/scratch-shared/ai4mi-group-9/ai4mi_project}"
+MODE="${MODE:-train}"
 SEED="${SEED:-42}"
 EPOCHS="${EPOCHS:-25}"
-RUN_NAME="${RUN_NAME:-baseline_test}"
+RUN_NAME="${RUN_NAME:-transunet_ranger_cedice}"
 RESULTS_DIR="${RESULTS_DIR:-train_results}"
 
+# TransUNet + Ranger + CEDice specific parameters
+EXTRA_PARAMS="${EXTRA_PARAMS:---model_class TransUNet --optimizer ranger --loss cedice --cedice_alpha 0.3 --cedice_beta 0.7 --use_scheduler --grad_clip 1.0}"
+
 echo "[INFO] Job mode: $MODE | Seed: $SEED | Epochs: $EPOCHS"
+echo "[INFO] Model: TransUNet | Optimizer: Ranger | Loss: CEDice (0.3/0.7)"
 echo "[INFO] Project dir: $PROJECT_DIR"
 
 # ------------------------------
@@ -112,7 +116,7 @@ run_train_eval_for_seed() {
   python -O main.py \
     --dataset SEGTHOR_CLEAN \
     --mode full \
-    --epoch "$EPOCHS" \
+    --epochs "$EPOCHS" \
     --dest "$dest" \
     --gpu \
     --wandb_entity "${WANDB_ENTITY:-}" \
@@ -143,7 +147,8 @@ run_train_eval_for_seed() {
     --pred_extension .nii.gz \
     --num_classes 5 \
     --metrics 3d_dice 3d_hd95 3d_jaccard 3d_assd \
-    --save_folder "${dest}/metrics"
+    --save_folder "${dest}/metrics" \
+    --overwrite
     
   # Log metrics to wandb (using the same run ID from training)
   if [[ -f "${dest}/wandb_run_id.txt" ]]; then

@@ -3,29 +3,28 @@
 # ------------------------------
 # User-tweakable
 # ------------------------------
-PROJECT_DIR="${PROJECT_DIR:-$HOME/ai4mi_project}"
+PROJECT_DIR="${PROJECT_DIR:-/scratch-shared/ai4mi-group-9/ai4mi_project}"
 JOB_SCRIPT="${JOB_SCRIPT:-${PROJECT_DIR}/jobs/architecture/000_run_seed.job}"
 
 # Slurm resources (can be overridden via env or CLI if you wish)
-PARTITION="${PARTITION:-gpu_a100}"
+PARTITION="${PARTITION:-gpu_h100}"
 GPUS="${GPUS:-1}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-9}"
-TIME_LIMIT="${TIME_LIMIT:-02:00:00}"
-OUTPUT_DIR_REL="outfiles"
+TIME_LIMIT="${TIME_LIMIT:-06:00:00}"
+OUTPUT_DIR_REL="out"
 
 # Concurrency control
 MAX_JOBS="${MAX_JOBS:-9}"      # max concurrent jobs for this user
-SLEEP_TIME="${SLEEP_TIME:-60}" # seconds between queue checks
+SLEEP_TIME="${SLEEP_TIME:-1}" # seconds between queue checks
 RUN_PREP_FIRST="${RUN_PREP_FIRST:-false}" # Optional: run a single prep job first to avoid race conditions
 
 # Seeds to launch (each becomes its own Slurm job)
-SEEDS=(42 420 37)
+SEEDS=(42 37 420)
 # Training config to export
 EPOCHS="${EPOCHS:-25}"
-RUN_NAME="${RUN_NAME:-ExampleName}"
-RESULTS_DIR="${RESULTS_DIR:-train_results_arch}"
-EXTRA_PARAMS="${EXTRA_PARAMS:-}"
-# EXTRA_PARAMS="${EXTRA_PARAMS:---model_class ExampleModel}"
+RUN_NAME="${RUN_NAME:-transunet_ranger_cedice}"
+RESULTS_DIR="${RESULTS_DIR:-train_results}"
+EXTRA_PARAMS="${EXTRA_PARAMS:---model_class TransUNet --optimizer ranger --loss cedice --cedice_alpha 0.3 --cedice_beta 0.7 --use_scheduler --grad_clip 1.0}"
 
 mkdir -p "${PROJECT_DIR}/${OUTPUT_DIR_REL}"
 USER_NAME=$(whoami)
@@ -49,7 +48,7 @@ prep_job_id=""
 if [[ "$RUN_PREP_FIRST" == "true" ]]; then
   wait_for_available_slot
   echo "📦 Submitting PREP job (data prep + GT stitching)…"
-  PREP_OUT="${PROJECT_DIR}/${OUTPUT_DIR_REL}/prep_%A.out"
+  PREP_OUT="${PROJECT_DIR}/${OUTPUT_DIR_REL}/prep.log"
   prep_submit=$(sbatch \
     --job-name="data_prep" \
     --output="$PREP_OUT" \
@@ -72,7 +71,7 @@ for seed in "${SEEDS[@]}"; do
   wait_for_available_slot
 
   TAG="${RUN_NAME}_s${seed}"
-  OUT_PATH="${PROJECT_DIR}/${OUTPUT_DIR_REL}/${TAG}_%A.out"
+  OUT_PATH="${PROJECT_DIR}/${OUTPUT_DIR_REL}/${TAG}.log"
 
   echo "📤 Submitting TRAIN job for seed=$seed"
 
