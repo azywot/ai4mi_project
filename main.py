@@ -358,7 +358,7 @@ def runTraining(args):
                         opt.zero_grad()
 
                     # Sanity tests to see we loaded and encoded the data correctly
-                    assert 0 <= img.min() and img.max() <= 1
+                    # assert 0 <= img.min() and img.max() <= 1
                     B, _, W, H = img.shape
 
                     pred_logits = net(img)

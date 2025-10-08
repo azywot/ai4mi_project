@@ -176,8 +176,8 @@ def build_bg_compose(
                 alpha=(0.0, 600.0),
                 sigma=(9.0, 10.0),
                 do_rotation=rotations,
-                angle_x=None,
-                angle_y=None,
+                angle_x=(0.0, 0.0),
+                angle_y=(0.0, 0.0),
                 angle_z=(-15.0 / 360 * 2 * np.pi, 15.0 / 360 * 2 * np.pi),
                 do_scale=scaling,
                 scale=(0.9, 1.1),
@@ -373,7 +373,7 @@ class AugmentedDataset(torch.utils.data.Dataset):
 
         # Convert back to torch tensors
         img_t = torch.from_numpy(img).float()
-        seg_t = torch.from_numpy(seg).float()
+        seg_t = torch.from_numpy(seg).bool()
 
         return {"images": img_t, "gts": seg_t}
 
