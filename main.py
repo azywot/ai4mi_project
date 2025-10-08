@@ -245,12 +245,12 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
         train_set, args
     )  # Add augmentation if specified
 
-    if args.aug != "none":
-        from augment_data import save_aug_examples
+    # if args.aug != "none":
+        # from augment_data import save_aug_examples
 
-        save_aug_examples(
-            train_set, args.dest, n_samples=4, n_augments=3
-        )  # Save some examples of augmentations
+        # save_aug_examples(
+        #     train_set, args.dest, n_samples=4, n_augments=3
+        # )  # Save some examples of augmentations
 
     train_loader = DataLoader(train_set, batch_size=B, num_workers=5, shuffle=True)
 
@@ -558,34 +558,6 @@ def main():
     parser.add_argument('--dicefocal_alpha_fg', type=float, default=None,
                         help="Optional focal alpha weight for foreground classes (if set)")
 
-    parser.add_argument("--gpu", action="store_true")
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Keep only a fraction (10 samples) of the datasets, "
-        "to test the logics around epochs and logging easily.",
-    )
-    parser.add_argument(
-        "--wandb_project", type=str, default="ai4mi-segthor", help="Wandb project name"
-    )
-    parser.add_argument(
-        "--wandb_entity", type=str, default=None, help="Wandb entity name (optional)"
-    )
-    parser.add_argument(
-        "--wandb_offline", action="store_true", help="Run wandb in offline mode"
-    )
-    parser.add_argument(
-        "--wandb_name",
-        type=str,
-        default=None,
-        help="Custom name for wandb experiment run",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility (default: 42)",
-    )
     add_augmentation_cli(parser)
     args = parser.parse_args()
 

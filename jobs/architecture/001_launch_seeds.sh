@@ -24,7 +24,7 @@ SEEDS=(42 420 37)
 EPOCHS="${EPOCHS:-25}"
 RUN_NAME="${RUN_NAME:-ExampleName}"
 RESULTS_DIR="${RESULTS_DIR:-train_results_arch}"
-EXTRA_PARAMS="${EXTRA_PARAMS:---use_preprocessing}” ⁠
+EXTRA_PARAMS="${EXTRA_PARAMS:-}"
 
 mkdir -p "${PROJECT_DIR}/${OUTPUT_DIR_REL}"
 USER_NAME=$(whoami)
