@@ -427,10 +427,6 @@ def runTraining(args):
             src_iter_dir = (args.dest / "_tmp" / f"iter{e:03d}") if args.save_best_only else (args.dest / f"iter{e:03d}")
             if src_iter_dir.exists():
                 copytree(src_iter_dir, Path(best_folder))
-            # Source depends on whether we saved only to temporary folder
-            src_iter_dir = (args.dest / "_tmp" / f"iter{e:03d}") if args.save_best_only else (args.dest / f"iter{e:03d}")
-            if src_iter_dir.exists():
-                copytree(src_iter_dir, Path(best_folder))
 
             torch.save(net, args.dest / "bestmodel.pkl")
             torch.save(net.state_dict(), args.dest / "bestweights.pt")
