@@ -8,3 +8,4 @@ scikit-image
 matplotlib
 monai
 torch-optimizer
+batchgenerators

@@ -516,24 +516,6 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     
     wandb.config.update(wandb_config)
     
-    # Log model architecture (commented out due to pickle issues with wandb.watch)
-    # wandb.watch(net, log="all", log_freq=10)
-    lr = 0.0005
-    optimizer = torch.optim.Adam(net.parameters(), lr=lr, betas=(0.9, 0.999))
-
-    # Log model architecture and hyperparameters to wandb
-    wandb.config.update({
-        "learning_rate": lr,
-        "optimizer": "Adam",
-        "betas": (0.9, 0.999),
-        "num_classes": K,
-        "kernels": kernels,
-        "factor": factor,
-        "batch_size": datasets_params[args.dataset]['B'],
-        "num_workers": 5,
-        "seed": args.seed,
-    })
-
     args.dest.mkdir(parents=True, exist_ok=True)
 
     return (net, optimizer, scheduler, device, train_loader, val_loader, K)
