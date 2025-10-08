@@ -3,7 +3,7 @@
 # ------------------------------
 # User-tweakable
 # ------------------------------
-PROJECT_DIR="${PROJECT_DIR:-/scratch-shared/ai4mi-group-9/ai4mi_project}"
+PROJECT_DIR="${PROJECT_DIR:-$HOME/ai4mi_project}"
 JOB_SCRIPT="${JOB_SCRIPT:-${PROJECT_DIR}/jobs/architecture/000_run_seed.job}"
 
 # Slurm resources (can be overridden via env or CLI if you wish)

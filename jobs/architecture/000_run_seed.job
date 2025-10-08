@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
 #SBATCH --time=06:00:00
-#SBATCH --output=/scratch-shared/ai4mi-group-9/ai4mi_project/out/transunet_%A.out
+#SBATCH --output=out/transunet_%A.out
 #SBATCH --hint=nomultithread
 
 set -Eeuo pipefail
@@ -14,7 +14,7 @@ trap 'echo "[ERR] Line $LINENO failed. Exiting." >&2' ERR
 # ------------------------------
 # Config (overridable via --export)
 # ------------------------------
-PROJECT_DIR="${PROJECT_DIR:-/scratch-shared/ai4mi-group-9/ai4mi_project}"
+PROJECT_DIR="${PROJECT_DIR:-$HOME/ai4mi_project}"
 MODE="${MODE:-train}"
 SEED="${SEED:-42}"
 EPOCHS="${EPOCHS:-25}"
