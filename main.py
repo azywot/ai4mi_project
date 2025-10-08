@@ -56,17 +56,40 @@ from functools import partial
 from dataset import SliceDataset
 from ShallowNet import shallowCNN
 from ENet import ENet
-from utils import (
-    Dcm,
-    class2one_hot,
-    probs2one_hot,
-    probs2class,
-    tqdm_,
-    dice_coef,
-    save_images,
-)
+from modules.ENet_MobileVit import ENet as ENet_MobileVit
+from modules.ENet_MobileVit2 import ENet as ENet_MobileVit2
+from modules.ENet_SE_CBAM_ASPP import ENet as ENet_SE_CBAM_ASPP
+from modules.ENet_ViT import ENet as ENet_ViT
+from modules.TransUNet import TransUNet
+from modules.TransUnetLite import TransUNetLite
+from modules.TransUNetMid import TransUNetMid
+from utils import (Dcm,
+                   class2one_hot,
+                   probs2one_hot,
+                   probs2class,
+                   tqdm_,
+                   dice_coef,
+                   save_images)
 
-from losses import CrossEntropy
+from losses import (CrossEntropy, DiceLoss, CEDiceLoss, FocalCrossEntropy,
+                    GeneralizedDiceLoss, TverskyLoss, DiceFocalLoss,
+                    MonaiDiceLossWrapper, MonaiGeneralizedDiceLossWrapper,
+                    MonaiTverskyLossWrapper, MonaiDiceCELossWrapper,
+                    MonaiFocalLossWrapper, MonaiHausdorffDTLossWrapper,
+                    HausdorffDTLikeLoss)
+
+
+# Dictionary to map model class names to their corresponding classes
+MODEL_CLASSES = {
+    'ENet': ENet,
+    'ENet_MobileVit': ENet_MobileVit,
+    'ENet_MobileVit2': ENet_MobileVit2,
+    'ENet_SE_CBAM_ASPP': ENet_SE_CBAM_ASPP,
+    'ENet_ViT': ENet_ViT,
+    'TransUNet': TransUNet,
+    'TransUNetLite': TransUNetLite,
+    'TransUNetMid': TransUNetMid,
+}
 
 
 def set_random_seed(seed: int = 42) -> None:
@@ -95,16 +118,10 @@ def set_random_seed(seed: int = 42) -> None:
 datasets_params: dict[str, dict[str, Any]] = {}
 # K for the number of classes
 # Avoids the classes with C (often used for the number of Channel)
-datasets_params["TOY2"] = {"K": 2, "net": shallowCNN, "B": 2, "kernels": 8, "factor": 2}
-datasets_params["SEGTHOR"] = {"K": 5, "net": ENet, "B": 8, "kernels": 8, "factor": 2}
-datasets_params["SEGTHOR_CLEAN"] = {
-    "K": 5,
-    "net": ENet,
-    "B": 8,
-    "kernels": 8,
-    "factor": 2,
-}
-
+datasets_params["TOY2"] = {'K': 2, 'net': shallowCNN, 'B': 2, 'kernels': 8, 'factor': 2}
+datasets_params["SEGTHOR"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
+datasets_params["SEGTHOR_CLEAN"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
+datasets_params["SEGTHOR_CLEAN_v2"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 
 def img_transform(img):
     img = img.convert("L")
@@ -146,8 +163,8 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
         experiment_name = args.wandb_name
     else:
         experiment_name = f"{args.dataset}_{args.mode}_{args.epochs}epochs"
-
-    wandb.init(
+    
+    run = wandb.init(
         project=args.wandb_project,
         entity=args.wandb_entity,
         name=experiment_name,
@@ -163,45 +180,53 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
             "experiment_name": experiment_name,
         },
     )
-
+    
+    # Save wandb run ID for later use (to append metrics)
+    try:
+        args.dest.mkdir(parents=True, exist_ok=True)
+        with open(args.dest / "wandb_run_id.txt", "w") as f:
+            f.write(run.id)
+        print(f">> Saved wandb run ID: {run.id}")
+    except Exception as e:
+        print(f">> Warning: Could not save wandb run ID: {e}")
+    
     # Networks and scheduler
     gpu: bool = args.gpu and torch.cuda.is_available()
     device = torch.device("cuda") if gpu else torch.device("cpu")
     print(f">> Picked {device} to run experiments")
 
-    K: int = datasets_params[args.dataset]["K"]
-    kernels: int = (
-        datasets_params[args.dataset]["kernels"]
-        if "kernels" in datasets_params[args.dataset]
-        else 8
-    )
-    factor: int = (
-        datasets_params[args.dataset]["factor"]
-        if "factor" in datasets_params[args.dataset]
-        else 2
-    )
-    net = datasets_params[args.dataset]["net"](1, K, kernels=kernels, factor=factor)
+
+    K: int = datasets_params[args.dataset]['K']
+    kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
+    factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
+    try:
+        net = MODEL_CLASSES[args.model_class](1, K, kernels=kernels, factor=factor)
+    except TypeError:
+        net = MODEL_CLASSES[args.model_class]()
+
     net.init_weights()
     net.to(device)
+    # print number of trainable parameters
+    num_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
+    print(f">> Created {MODEL_CLASSES[args.model_class].__name__} with {num_params:,} trainable parameters")
+    print(net)
 
     lr = 0.0005
     optimizer = torch.optim.Adam(net.parameters(), lr=lr, betas=(0.9, 0.999))
 
     # Log model architecture and hyperparameters to wandb
-    wandb.config.update(
-        {
-            "learning_rate": lr,
-            "optimizer": "Adam",
-            "betas": (0.9, 0.999),
-            "num_classes": K,
-            "kernels": kernels,
-            "factor": factor,
-            "batch_size": datasets_params[args.dataset]["B"],
-            "num_workers": 5,
-            "seed": args.seed,
-        }
-    )
-
+    wandb.config.update({
+        "learning_rate": lr,
+        "optimizer": "Adam",
+        "betas": (0.9, 0.999),
+        "num_classes": K,
+        "kernels": kernels,
+        "factor": factor,
+        "batch_size": datasets_params[args.dataset]['B'],
+        "num_workers": 5,
+        "seed": args.seed,
+    })
+    
     # Log model architecture (commented out due to pickle issues with wandb.watch)
     # wandb.watch(net, log="all", log_freq=10)
 
@@ -247,14 +272,50 @@ def runTraining(args):
     print(f">>> Setting up to train on {args.dataset} with {args.mode}")
     net, optimizer, device, train_loader, val_loader, K = setup(args)
 
+    # Determine class mask according to supervision mode
     if args.mode == "full":
-        loss_fn = CrossEntropy(
-            idk=list(range(K))
-        )  # Supervise both background and foreground
-    elif args.mode in ["partial"] and args.dataset == "SEGTHOR":
-        loss_fn = CrossEntropy(idk=[0, 1, 3, 4])  # Do not supervise the heart (class 2)
+        idk = list(range(K))  # Supervise both background and foreground
+    elif args.mode in ["partial"] and args.dataset == 'SEGTHOR':
+        idk = [0, 1, 3, 4]  # Do not supervise the heart (class 2)
     else:
         raise ValueError(args.mode, args.dataset)
+
+    # Select loss according to --loss flag
+    if args.loss == 'ce':
+        loss_fn = CrossEntropy(idk=idk)
+    elif args.loss == 'dice':
+        loss_fn = DiceLoss(idk=idk)
+    elif args.loss == 'cedice':
+        loss_fn = CEDiceLoss(idk=idk, alpha=args.cedice_alpha, beta=args.cedice_beta)
+    elif args.loss == 'focal':
+        loss_fn = FocalCrossEntropy(idk=idk)
+    elif args.loss == 'gdl':
+        loss_fn = GeneralizedDiceLoss(idk=idk)
+    elif args.loss == 'tversky':
+        loss_fn = TverskyLoss(idk=idk)
+    elif args.loss == 'dicefocal':
+        loss_fn = DiceFocalLoss(idk=idk,
+                                alpha_dice=args.dicefocal_alpha_dice,
+                                beta_focal=args.dicefocal_beta_focal,
+                                gamma=args.dicefocal_gamma,
+                                focal_alpha_bg=args.dicefocal_alpha_bg,
+                                focal_alpha_fg=args.dicefocal_alpha_fg)
+    elif args.loss == 'monai_dice':
+        loss_fn = MonaiDiceLossWrapper(idk=idk)
+    elif args.loss == 'monai_gdl':
+        loss_fn = MonaiGeneralizedDiceLossWrapper(idk=idk)
+    elif args.loss == 'monai_tversky':
+        loss_fn = MonaiTverskyLossWrapper(idk=idk)
+    elif args.loss == 'monai_dicece':
+        loss_fn = MonaiDiceCELossWrapper(idk=idk)
+    elif args.loss == 'monai_focal':
+        loss_fn = MonaiFocalLossWrapper(idk=idk)
+    elif args.loss == 'monai_hausdorffdt':
+        loss_fn = MonaiHausdorffDTLossWrapper(idk=idk)
+    elif args.loss == 'hausdorff':
+        loss_fn = HausdorffDTLikeLoss(idk=idk)
+    else:
+        raise ValueError(f"Unknown loss: {args.loss}")
 
     # Notice one has the length of the _loader_, and the other one of the _dataset_
     log_loss_tra: Tensor = torch.zeros((args.epochs, len(train_loader)))
@@ -325,11 +386,13 @@ def runTraining(args):
                             warnings.filterwarnings("ignore", category=UserWarning)
                             predicted_class: Tensor = probs2class(pred_probs)
                             mult: int = 63 if K == 5 else (255 / (K - 1))
-                            save_images(
-                                predicted_class * mult,
-                                data["stems"],
-                                args.dest / f"iter{e:03d}" / m,
-                            )
+                            # Decide per-epoch save dir (temporary if save_best_only)
+                            base_iter_dir = (args.dest / "_tmp" / f"iter{e:03d}") if args.save_best_only else (args.dest / f"iter{e:03d}")
+                            # Decide per-epoch save dir (temporary if save_best_only)
+                            base_iter_dir = (args.dest / "_tmp" / f"iter{e:03d}") if args.save_best_only else (args.dest / f"iter{e:03d}")
+                            save_images(predicted_class * mult,
+                                            data['stems'],
+                                            base_iter_dir / m)
 
                     j += B  # Keep in mind that _in theory_, each batch might have a different size
                     # For the DSC average: do not take the background class (0) into account:
@@ -391,7 +454,10 @@ def runTraining(args):
             best_folder = args.dest / "best_epoch"
             if best_folder.exists():
                 rmtree(best_folder)
-            copytree(args.dest / f"iter{e:03d}", Path(best_folder))
+            # Source depends on whether we saved only to temporary folder
+            src_iter_dir = (args.dest / "_tmp" / f"iter{e:03d}") if args.save_best_only else (args.dest / f"iter{e:03d}")
+            if src_iter_dir.exists():
+                copytree(src_iter_dir, Path(best_folder))
 
             torch.save(net, args.dest / "bestmodel.pkl")
             torch.save(net.state_dict(), args.dest / "bestweights.pt")
@@ -399,7 +465,17 @@ def runTraining(args):
             # Save model artifacts to wandb
             wandb.save(str(args.dest / "bestmodel.pkl"))
             wandb.save(str(args.dest / "bestweights.pt"))
-
+        
+        # Cleanup temporary per-epoch images if not best and saving best only
+        if args.save_best_only:
+            tmp_dir = args.dest / "_tmp" / f"iter{e:03d}"
+            if tmp_dir.exists() and (current_dice <= best_dice):
+                try:
+                    rmtree(tmp_dir)
+                except Exception:
+                    print(f">> Warning: Failed to remove temporary directory {tmp_dir}")
+                    pass
+    
     # Final logging and artifact saving
     print(f">>> Training completed. Best dice: {best_dice:.3f}")
     wandb.log({"final_best_dice": best_dice}, step=args.epochs - 1)
@@ -434,15 +510,53 @@ def runTraining(args):
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--epochs", default=20, type=int)
-    parser.add_argument("--dataset", default="TOY2", choices=datasets_params.keys())
-    parser.add_argument("--mode", default="full", choices=["partial", "full"])
-    parser.add_argument(
-        "--dest",
-        type=Path,
-        required=True,
-        help="Destination directory to save the results (predictions and weights).",
-    )
+    parser.add_argument('--epochs', default=20, type=int)
+    parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
+    parser.add_argument('--mode', default='full', choices=['partial', 'full'])
+    parser.add_argument('--loss', default='ce', choices=['ce', 'dice', 'cedice', 'focal', 'gdl', 'tversky', 'dicefocal',
+                                                         'monai_dice', 'monai_gdl', 'monai_tversky', 'monai_dicece', 'monai_focal',
+                                                         'monai_hausdorffdt', 'hausdorff'],
+                        help="Loss function to use for training")
+    parser.add_argument('--dest', type=Path, required=True,
+                        help="Destination directory to save the results (predictions and weights).")
+
+    parser.add_argument('--gpu', action='store_true')
+    parser.add_argument('--debug', action='store_true',
+                        help="Keep only a fraction (10 samples) of the datasets, "
+                             "to test the logics around epochs and logging easily.")
+    parser.add_argument('--wandb_project', type=str, default='ai4mi-segthor',
+                        help="Wandb project name")
+    parser.add_argument('--wandb_entity', type=str, default=None,
+                        help="Wandb entity name (optional)")
+    parser.add_argument('--wandb_offline', action='store_true',
+                        help="Run wandb in offline mode")
+    parser.add_argument('--wandb_name', type=str, default=None,
+                        help="Custom name for wandb experiment run")
+    parser.add_argument('--seed', type=int, default=42,
+                        help="Random seed for reproducibility (default: 42)")
+    
+    ###############################################################################
+    parser.add_argument('--model_class', type=str, default='ENet',
+                        choices=MODEL_CLASSES.keys(),
+                        help="Network architecture to use.")
+    ###############################################################################
+
+    parser.add_argument('--save_best_only', action='store_true',
+                        help="If set, only store images for best_epoch; intermediate epoch images are temporary")
+    parser.add_argument('--cedice_alpha', type=float, default=0.5,
+                        help="Weight for CE term in CE+Dice (alpha)")
+    parser.add_argument('--cedice_beta', type=float, default=0.5,
+                        help="Weight for Dice term in CE+Dice (beta)")
+    parser.add_argument('--dicefocal_alpha_dice', type=float, default=0.5,
+                        help="Weight for Dice term in Dice+Focal (alpha_dice)")
+    parser.add_argument('--dicefocal_beta_focal', type=float, default=0.5,
+                        help="Weight for Focal term in Dice+Focal (beta_focal)")
+    parser.add_argument('--dicefocal_gamma', type=float, default=2.0,
+                        help="Focal gamma parameter for Dice+Focal")
+    parser.add_argument('--dicefocal_alpha_bg', type=float, default=None,
+                        help="Optional focal alpha weight for background class (if set)")
+    parser.add_argument('--dicefocal_alpha_fg', type=float, default=None,
+                        help="Optional focal alpha weight for foreground classes (if set)")
 
     parser.add_argument("--gpu", action="store_true")
     parser.add_argument(

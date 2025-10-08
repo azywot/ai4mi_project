@@ -37,6 +37,7 @@ from utils import map_, tqdm_
 
 
 def get_z(image: Path) -> int:
+<<<<<<< HEAD
     return int(image.stem.split("_")[-1])
 
 
@@ -48,6 +49,13 @@ def merge_patient(
     K: int,
     source_pattern: str,
 ) -> None:
+=======
+    return int(image.stem.split('_')[-1])
+
+
+def merge_patient(id_: str, dest_folder: str, images: list[Path],
+                  idxes: list[int], K: int, source_pattern: str) -> None:
+>>>>>>> b0b0e2635d59ae92c079d5adad148e68fc051b47
     # print(source_pattern.format(id_=id_))
     orig_nib = nib.load(source_pattern.format(id_=id_))
     orig_shape = np.asarray(orig_nib.dataobj).shape
@@ -67,6 +75,7 @@ def merge_patient(
         # SEGTHOR encoding uses [0, 63, 126, 189, 252]
         assert set(np.unique(img_arr)) <= {0, 63, 126, 189, 252}, np.unique(img_arr)
 
+<<<<<<< HEAD
         resized: np.ndarray = resize(
             img_arr,
             (X, Y),
@@ -75,6 +84,14 @@ def merge_patient(
             anti_aliasing=False,
             order=0,
         )
+=======
+
+        resized: np.ndarray = resize(img_arr, (X, Y),
+                                     mode="constant",
+                                     preserve_range=True,
+                                     anti_aliasing=False,
+                                     order=0)
+>>>>>>> b0b0e2635d59ae92c079d5adad148e68fc051b47
 
         res_arr[:, :, z] = resized[...]
 
@@ -87,9 +104,13 @@ def merge_patient(
     res_arr //= 63  # For segthor only
     assert set(np.unique(res_arr)) == set(range(5)), np.uint8(res_arr)
 
+<<<<<<< HEAD
     new_nib = nib.nifti1.Nifti1Image(
         res_arr, affine=orig_nib.affine, header=orig_nib.header
     )
+=======
+    new_nib = nib.nifti1.Nifti1Image(res_arr, affine=orig_nib.affine, header=orig_nib.header)
+>>>>>>> b0b0e2635d59ae92c079d5adad148e68fc051b47
     nib.save(new_nib, (Path(dest_folder) / id_).with_suffix(".nii.gz"))
 
 
@@ -104,9 +125,13 @@ def main(args) -> None:
     unique_patients: list[str] = list(set(patients))
     print(unique_patients)
     assert len(unique_patients) < len(images)
+<<<<<<< HEAD
     print(
         f"Found {len(unique_patients)} unique patients out of {len(images)} images ; regex: {args.grp_regex}"
     )
+=======
+    print(f"Found {len(unique_patients)} unique patients out of {len(images)} images ; regex: {args.grp_regex}")
+>>>>>>> b0b0e2635d59ae92c079d5adad148e68fc051b47
 
     idx_map: dict[str, list[int]] = dict(zip(unique_patients, repeat(None)))  # type: ignore
     for i, patient in enumerate(patients):
@@ -121,6 +146,7 @@ def main(args) -> None:
     args.dest_folder.mkdir(parents=True, exist_ok=True)
 
     for p in tqdm_(unique_patients):
+<<<<<<< HEAD
         merge_patient(
             p,
             args.dest_folder,
@@ -129,10 +155,14 @@ def main(args) -> None:
             args.num_classes,
             args.source_scan_pattern,
         )
+=======
+        merge_patient(p, args.dest_folder, images, idx_map[p], args.num_classes, args.source_scan_pattern)
+>>>>>>> b0b0e2635d59ae92c079d5adad148e68fc051b47
     # mmap_(lambda p: merge_patient(p, args.dest_folder, images, idx_map[p], K=args.num_classes), patients)
 
 
 def get_args() -> argparse.Namespace:
+<<<<<<< HEAD
     parser = argparse.ArgumentParser(description="Merging slices parameters")
     parser.add_argument(
         "--data_folder",
@@ -150,6 +180,17 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("--grp_regex", type=str, required=True)
 
     parser.add_argument("--num_classes", type=int, default=4)
+=======
+    parser = argparse.ArgumentParser(description='Merging slices parameters')
+    parser.add_argument('--data_folder', type=Path, required=True,
+                        help="The folder containing the images to predict")
+    parser.add_argument('--source_scan_pattern', type=str, required=True,
+                        help="The pattern to get the original scan. This is used to get the correct metadata")
+    parser.add_argument('--dest_folder', type=Path, required=True)
+    parser.add_argument('--grp_regex', type=str, required=True)
+
+    parser.add_argument('--num_classes', type=int, default=4)
+>>>>>>> b0b0e2635d59ae92c079d5adad148e68fc051b47
 
     args = parser.parse_args()
 
@@ -159,4 +200,8 @@ def get_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     main(get_args())
+=======
+    main(get_args())
+>>>>>>> b0b0e2635d59ae92c079d5adad148e68fc051b47

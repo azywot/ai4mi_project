@@ -132,4 +132,8 @@ def get_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     main(get_args())
+=======
+    main()
+>>>>>>> b0b0e2635d59ae92c079d5adad148e68fc051b47
