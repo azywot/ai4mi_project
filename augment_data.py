@@ -148,13 +148,13 @@ def build_bg_compose(
     if brightness:
         tr.append(
             BrightnessMultiplicativeTransform(
-                multiplier_range=(0.5, 2.0), per_channel=True, p_per_sample=p_per_sample
+                multiplier_range=(0.5, 1.5), per_channel=True, p_per_sample=p_per_sample
             )
         )
     if gamma:
         tr.append(
             GammaTransform(
-                gamma_range=(0.7, 1.5),
+                gamma_range=(0.8, 1.3),
                 invert_image=False,
                 per_channel=True,
                 retain_stats=True,
@@ -164,7 +164,7 @@ def build_bg_compose(
     if gaussian_noise:
         tr.append(
             GaussianNoiseTransform(
-                noise_variance=(0.0, 0.05), p_per_sample=p_per_sample
+                noise_variance=(0.0, 0.03), p_per_sample=p_per_sample
             )
         )
     if rotations or scaling or elastic:
@@ -173,14 +173,14 @@ def build_bg_compose(
                 patch_size=list(patch_shape),
                 patch_center_dist_from_border=[ps // 2 for ps in patch_shape],
                 do_elastic_deform=elastic,
-                alpha=(0.0, 900.0),
-                sigma=(9.0, 13.0),
+                alpha=(0.0, 600.0),
+                sigma=(9.0, 10.0),
                 do_rotation=rotations,
                 angle_x=None,
                 angle_y=None,
                 angle_z=(-15.0 / 360 * 2 * np.pi, 15.0 / 360 * 2 * np.pi),
                 do_scale=scaling,
-                scale=(0.85, 1.25),
+                scale=(0.9, 1.1),
                 border_mode_data="nearest",
                 border_cval_data=0.0,
                 border_mode_seg="nearest",
