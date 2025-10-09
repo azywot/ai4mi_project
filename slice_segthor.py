@@ -37,7 +37,7 @@ from skimage.io import imsave
 from skimage.transform import resize
 
 from utils import map_, tqdm_
-from preprocessing import apply_hu_window, zscore_normalize, get_body_mask, crop_to_body, resample_inplane
+from preprocessing import preprocess_ct_volume
 
 
 
@@ -108,25 +108,14 @@ def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int
         gt = np.zeros_like(ct, dtype=np.uint8)
 
     if use_preprocessing:
-        # --- HU window wider to include trachea + soft tissue
-        ct = apply_hu_window(ct, -1000, 1000)
-
-        mask = get_body_mask(ct)
-        ct = crop_to_body(ct, mask, margin=10)
-        gt = crop_to_body(gt, mask, margin=10) if not test_mode else gt
-
-        ct = zscore_normalize(ct)
-
-        ct = resample_inplane(ct, new_spacing=(1.0, 1.0), spacing=spacing_yxz, is_label=False)
-        if not test_mode:
-            gt = resample_inplane(gt, new_spacing=(1.0, 1.0), spacing=spacing_yxz, is_label=True)
-
-        # --- Convert to uint8 for PNG storage (scale to 0–255)
-        norm_ct = np.clip((ct - ct.min()) / (ct.max() - ct.min() + 1e-8), 0, 1)
-        norm_ct = (norm_ct * 255.0).astype(np.uint8)
-
+        norm_ct = preprocess_ct_volume(
+            ct,
+            p_low=1.0, p_high=99.5, hu_clip=(-1000, 1500),
+            alpha=3.0, base_clip=1.85,
+            z_smooth=True, z_w=(0.2, 0.6, 0.2),
+            unsharp_sigma=1.0, unsharp_amount=0.14
+        )
     else:
-        # Baseline path unchanged
         norm_ct = norm_arr(ct)
 
     z = norm_ct.shape[2] 
