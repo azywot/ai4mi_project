@@ -227,7 +227,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--process', '-p', type=int, default=1,
                         help="The number of cores to use for processing")
     parser.add_argument("--use_preprocessing", action="store_true",
-    help="Preprocess: HU clip [-1000,1000], Otsu body cropping, z-score normalization, in-plane resample to 1mm")
+                        help="Use preprocessing (percentile window + log tone map + adaptive CLAHE + optional z-smooth + gated unsharp) before slicing")
     
     args = parser.parse_args()
     random.seed(args.seed)
@@ -239,3 +239,4 @@ def get_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     main(get_args())
+
