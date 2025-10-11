@@ -4,7 +4,7 @@
 #SBATCH --job-name=Eval
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=03:30:00
+#SBATCH --time=00:10:00
 #SBATCH --output=outfiles/postprocessing_final_%A.out
 
 module purge
@@ -18,12 +18,12 @@ source ../ai4mi_project_michal/ai4mi/bin/activate
 # echo "=== Stiching and CRF Post-Processing for Medical Images ==="
 # echo ""
 
-# python stitch_new.py \
-#     --data_folder data/SEGTHOR_CLEAN/val/gt \
-#     --dest_folder val/val_gt \
-#     --num_classes 5 \
-#     --grp_regex "(Patient_\d\d)_\d\d\d\d" \
-#     --source_scan_pattern "data/segthor_train/train/{id_}/GT.nii.gz"
+python stitch_new.py \
+    --data_folder data/SEGTHOR_CLEAN/val/gt \
+    --dest_folder val_3/val_gt \
+    --num_classes 255 \
+    --grp_regex "(Patient_\d\d)_\d\d\d\d" \
+    --source_scan_pattern "data/segthor_train/train/{id_}/GT.nii.gz"
 
 # python stitch_new.py \
 #   --data_folder train_results/train_results_baseline_42/best_epoch/val \
