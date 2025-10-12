@@ -37,7 +37,7 @@ from skimage.io import imsave
 from skimage.transform import resize
 
 from utils import map_, tqdm_
-from preprocessing import preprocess_ct_volume
+from preprocessing import preprocess
 
 
 
@@ -83,7 +83,9 @@ resize_: Callable = partial(resize, mode="constant", preserve_range=True, anti_a
 
 
 def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int, int],
-                  test_mode: bool = False, use_preprocessing: bool = False) -> tuple[float, float, float]:
+                  test_mode: bool = False, use_preprocessing: bool = False,
+                  modes: list[str] = ["all"]) -> tuple[float, float, float]:
+
     id_path: Path = source_path / ("train" if not test_mode else "test") / id_
 
     ct_path: Path = (id_path / f"{id_}.nii.gz") if not test_mode else (source_path / "test" / f"{id_}.nii.gz")
@@ -108,13 +110,16 @@ def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int
         gt = np.zeros_like(ct, dtype=np.uint8)
 
     if use_preprocessing:
-        norm_ct = preprocess_ct_volume(
+        norm_ct = preprocess(
             ct,
+            modes=modes,      
             p_low=1.0, p_high=99.5, hu_clip=(-1000, 1500),
             alpha=3.0, base_clip=1.85,
-            z_smooth=True, z_w=(0.2, 0.6, 0.2),
+            z_w=(0.2, 0.6, 0.2),
             unsharp_sigma=1.0, unsharp_amount=0.14
         )
+
+
     else:
         norm_ct = norm_arr(ct)
 
@@ -130,7 +135,7 @@ def slice_patient(id_: str, dest_path: Path, source_path: Path, shape: tuple[int
         gt_slice *= 63
         assert gt_slice.dtype == np.uint8, gt_slice.dtype
         # assert set(np.unique(gt_slice)) <= set(range(5))
-        assert set(np.unique(gt_slice)) <= set([0, 63, 126, 189, 252]), np.unique(gt_slice)
+        assert set(np.unique(gt_slice)) <= set([0, 63, 126, 189, 252]), np.ugitnique(gt_slice)
 
         arrays: list[np.ndarray] = [img_slice, gt_slice]
 
@@ -192,11 +197,12 @@ def main(args: argparse.Namespace):
         print(f"Slicing {len(split_ids)} pairs to {dest_mode}")
 
         pfun: Callable = partial(slice_patient,
-                                 dest_path=dest_mode,
-                                 source_path=src_path,
-                                 shape=tuple(args.shape),
-                                 test_mode=mode == 'test',
-                                 use_preprocessing=args.use_preprocessing)
+                         dest_path=dest_mode,
+                         source_path=src_path,
+                         shape=tuple(args.shape),
+                         test_mode=mode == 'test',
+                         use_preprocessing=args.use_preprocessing,
+                         modes=args.modes)
         resolutions: list[tuple[float, float, float]]
         iterator = tqdm_(split_ids)
         match args.process:
@@ -228,6 +234,13 @@ def get_args() -> argparse.Namespace:
                         help="The number of cores to use for processing")
     parser.add_argument("--use_preprocessing", action="store_true",
                         help="Use preprocessing (percentile window + log tone map + adaptive CLAHE + optional z-smooth + gated unsharp) before slicing")
+    parser.add_argument(
+        "--modes", nargs="+", type=str, default=["all"],
+        choices=["window", "tone", "clahe", "zsmooth", "unsharp", "all"],
+        help="List of preprocessing stages to apply in sequence."
+    )
+
+
     
     args = parser.parse_args()
     random.seed(args.seed)
