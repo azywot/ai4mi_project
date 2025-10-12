@@ -47,25 +47,63 @@ def _unsharp_gated(img_u8: np.uint8, sigma=1.0, amount=0.14) -> np.uint8:
     out = src + (amount * gate) * mask
     return np.clip(out, 0, 255).astype(np.uint8)
 
-def preprocess_ct_volume(volume: np.ndarray,
-                         p_low=1.0, p_high=99.5, hu_clip=(-1000, 1500),
-                         alpha=3.0, base_clip=1.85,
-                         z_smooth=True, z_w=(0.2, 0.6, 0.2),
-                         unsharp_sigma=1.0, unsharp_amount=0.14) -> np.ndarray:
 
+def preprocess(volume: np.ndarray,
+               modes: list[str] = ["all"],
+               p_low=1.0, p_high=99.5, hu_clip=(-1000, 1500),
+               alpha=3.0, base_clip=1.85,
+               z_w=(0.2, 0.6, 0.2),
+               unsharp_sigma=1.0, unsharp_amount=0.14) -> np.ndarray:
+    """
+    Apply configurable CT preprocessing pipeline.
+
+    Parameters
+    ----------
+    volume : np.ndarray
+        3D CT volume in HU.
+    modes : list[str]
+        List of preprocessing stages to apply in order.
+        Accepted values: ["window", "tone", "clahe", "zsmooth", "unsharp", "all"]
+        Example:
+            ["window", "clahe", "zsmooth", "unsharp"] → all except tone
+    """
+
+    if "window" not in modes and "all" not in modes:
+        modes = ["window"] + modes
+
+    # --- always perform percentile windowing ---
     vol = _percentile_window_u8(volume, p_low=p_low, p_high=p_high, hu_clip=hu_clip)
-
+    out = vol.copy()
     Z = vol.shape[2]
-    enh = np.zeros_like(vol, dtype=np.uint8)
-    for z in range(Z):
-        s = _tone_map_log_u8(vol[:, :, z], alpha=alpha)
-        s = _clahe_adaptive_u8(s, base_clip=base_clip, tile=(8, 8))
-        enh[:, :, z] = s
 
-    if z_smooth:
-        enh = _z_smooth_3tap(enh, w=z_w)
+    # --- if 'all' is specified, recursively expand to full sequence ---
+    if "all" in modes:
+        modes = ["tone", "clahe", "zsmooth", "unsharp"]
 
-    out = np.zeros_like(enh, dtype=np.uint8)
-    for z in range(Z):
-        out[:, :, z] = _unsharp_gated(enh[:, :, z], sigma=unsharp_sigma, amount=unsharp_amount)
+    # --- apply stages in the given order ---
+    for mode in modes:
+        if mode == "tone":
+            for z in range(Z):
+                out[:, :, z] = _tone_map_log_u8(out[:, :, z], alpha=alpha)
+
+        elif mode == "clahe":
+            for z in range(Z):
+                out[:, :, z] = _clahe_adaptive_u8(out[:, :, z], base_clip=base_clip, tile=(8, 8))
+
+        elif mode == "zsmooth":
+            out = _z_smooth_3tap(out, w=z_w)
+
+        elif mode == "unsharp":
+            tmp = np.zeros_like(out, dtype=np.uint8)
+            for z in range(Z):
+                tmp[:, :, z] = _unsharp_gated(out[:, :, z], sigma=unsharp_sigma, amount=unsharp_amount)
+            out = tmp
+
+        elif mode == "window":
+            # already done above
+            continue
+
+        else:
+            raise ValueError(f"Unknown preprocessing mode: {mode}")
+
     return out

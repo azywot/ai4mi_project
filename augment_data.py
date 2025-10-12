@@ -135,7 +135,7 @@ def build_bg_compose(
 ) -> BGCompose:
     tr: List[Any] = []
     if mirror:
-        tr.append(MirrorTransform(axes=(0, 1)))
+        tr.append(MirrorTransform(axes=(1,)))  # horizontal flip only
     if contrast:
         tr.append(
             ContrastAugmentationTransform(
@@ -173,7 +173,7 @@ def build_bg_compose(
                 patch_size=list(patch_shape),
                 patch_center_dist_from_border=[ps // 2 for ps in patch_shape],
                 do_elastic_deform=elastic,
-                alpha=(0.0, 600.0),
+                alpha=(0.0, 150.0),
                 sigma=(9.0, 10.0),
                 do_rotation=rotations,
                 angle_x=(0.0, 0.0),
@@ -246,6 +246,35 @@ def preset_compose(name: str, patch_shape: Tuple[int, int]) -> BGCompose:
             elastic=False,
             brightness=True,
             contrast=True,
+            gamma=False,
+            gaussian_noise=False,
+            p_per_sample=0.15,
+            patch_shape=patch_shape,
+        )
+    elif name == "elastic-only":
+        # Apply only elastic deformation, no color/intensity changes
+        return build_bg_compose(
+            mirror=True,
+            rotations=False,
+            scaling=False,
+            elastic=True,
+            brightness=False,
+            contrast=False,
+            gamma=False,
+            gaussian_noise=False,
+            p_per_sample=0.15,
+            patch_shape=patch_shape,
+        )
+
+    elif name == "geo-only":
+        # Apply only geometric transforms (rotation + scaling)
+        return build_bg_compose(
+            mirror=True,
+            rotations=True,
+            scaling=True,
+            elastic=False,
+            brightness=False,
+            contrast=False,
             gamma=False,
             gaussian_noise=False,
             p_per_sample=0.15,
@@ -384,7 +413,15 @@ def add_augmentation_cli(parser: argparse.ArgumentParser) -> None:
         "--aug",
         type=str,
         default="none",
-        choices=["none", "basic", "basic+elastic", "hu+basic", "dkfz-like"],
+        choices=[
+            "none",
+            "basic",
+            "basic+elastic",
+            "hu+basic",
+            "dkfz-like",
+            "elastic-only",
+            "geo-only",
+        ],
         help="Training-time augmentation preset",
     )
     grp.add_argument(
