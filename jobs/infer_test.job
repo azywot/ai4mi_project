@@ -1,0 +1,167 @@
+#!/bin/bash
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=infer_test
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=03:00:00
+#SBATCH --output=out/infer_test_%A.out
+#SBATCH --hint=nomultithread
+
+set -Eeuo pipefail
+trap 'echo "[ERR] Line $LINENO failed. Exiting." >&2' ERR
+
+# ------------------------------
+# Config (overridable via --export or env)
+# ------------------------------
+PROJECT_DIR="${PROJECT_DIR:-$HOME/ai4mi_project}"
+
+# Input data (3D scans to segment)
+TEST_SRC_DIR_REL="${TEST_SRC_DIR_REL:-data/test}"
+
+# Where 2D slices will be written
+TEST_SLICES_DIR_REL="${TEST_SLICES_DIR_REL:-data/SEGTHOR_TEST}"
+
+# Per-slice predictions + stitched 3D outputs
+PRED_SLICES_DIR_REL="${PRED_SLICES_DIR_REL:-pred/test_slices}"
+STITCH_OUT_DIR_REL="${STITCH_OUT_DIR_REL:-pred/test_3d}"
+
+# Metrics output and GT location (adjust REF_GT_DIR_REL if your test GT differs)
+METRICS_OUT_DIR_REL="${METRICS_OUT_DIR_REL:-metrics/test}"
+REF_GT_DIR_REL="${REF_GT_DIR_REL:-data/test/gt}"
+
+# Model to use (prefer full pickled model)
+MODEL_PATH_REL="${MODEL_PATH_REL:-train_results/old_TransUNet_42/bestmodel.pkl}"
+
+# Preprocessing (mirror training)
+CROP_W="${CROP_W:-256}"
+CROP_H="${CROP_H:-256}"
+RETAIN="${RETAIN:-10}"
+PROC_MODES="${PROC_MODES:-clahe window zsmooth}"
+
+# Stitch naming assumptions (adjust if your IDs differ)
+GRP_REGEX="${GRP_REGEX:-(Patient_\\d\\d)_\\d\\d\\d\\d}"
+
+# If your source scans are data/test/{id_}/scan.nii.gz (default). Otherwise override.
+SOURCE_SCAN_PATTERN="${SOURCE_SCAN_PATTERN:-data/test/{id_}/scan.nii.gz}"
+
+# Runtime knobs
+BATCH_SIZE="${BATCH_SIZE:-32}"
+NUM_CLASSES="${NUM_CLASSES:-5}"
+CUDA_MODULE="${CUDA_MODULE:-CUDA/12.4.0}"
+
+echo "[INFO] ===== Inference config ====="
+echo "[INFO] Project dir:        $PROJECT_DIR"
+echo "[INFO] Test src dir:       $TEST_SRC_DIR_REL"
+echo "[INFO] Test slices dir:    $TEST_SLICES_DIR_REL"
+echo "[INFO] Pred slices dir:    $PRED_SLICES_DIR_REL"
+echo "[INFO] Stitched out dir:   $STITCH_OUT_DIR_REL"
+echo "[INFO] Metrics out dir:    $METRICS_OUT_DIR_REL"
+echo "[INFO] Ref GT dir:         $REF_GT_DIR_REL"
+echo "[INFO] Model path:         $MODEL_PATH_REL"
+echo "[INFO] Source scan patt.:  $SOURCE_SCAN_PATTERN"
+echo "[INFO] Group regex:        $GRP_REGEX"
+echo "[INFO] Preproc:            shape=(${CROP_W},${CROP_H}) retain=${RETAIN} modes='${PROC_MODES}'"
+echo "[INFO] Batch size:         $BATCH_SIZE"
+echo "[INFO] Num classes:        $NUM_CLASSES"
+
+# ------------------------------
+# Environment
+# ------------------------------
+module purge
+module load 2023
+module load Anaconda3/2023.07-2
+module load "${CUDA_MODULE}"
+
+cd "$PROJECT_DIR" || exit 1
+source ai4mi/bin/activate
+
+# Load .env (WANDB_* etc.) if present
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+  echo "[INFO] Loaded .env file"
+else
+  echo "[WARN] No .env file found. Continuing."
+fi
+
+# ------------------------------
+# Sanity checks
+# ------------------------------
+if [[ ! -d "$TEST_SRC_DIR_REL" ]]; then
+  echo "[ERR] Test source dir not found: $TEST_SRC_DIR_REL" >&2
+  exit 2
+fi
+
+if [[ ! -f "$MODEL_PATH_REL" ]]; then
+  echo "[ERR] Model file not found: $MODEL_PATH_REL" >&2
+  exit 3
+fi
+
+# ------------------------------
+# 1) Slice test volumes -> 2D slices
+# ------------------------------
+echo "[STEP] Slicing test volumes…"
+rm -rf "${TEST_SLICES_DIR_REL}_tmp"
+python -O slice_segthor.py \
+  --source_dir "${TEST_SRC_DIR_REL}" \
+  --dest_dir "${TEST_SLICES_DIR_REL}_tmp" \
+  --shape "${CROP_W}" "${CROP_H}" \
+  --retain "${RETAIN}" \
+  -p -1 \
+  --modes ${PROC_MODES}
+
+rm -rf "${TEST_SLICES_DIR_REL}"
+mv "${TEST_SLICES_DIR_REL}_tmp" "${TEST_SLICES_DIR_REL}"
+echo "[OK] Slices ready at: ${TEST_SLICES_DIR_REL}/test/img"
+
+# ------------------------------
+# 2) Per-slice inference
+# ------------------------------
+echo "[STEP] Running per-slice inference…"
+mkdir -p "$(dirname "${PRED_SLICES_DIR_REL}")"
+python -O predict_slices.py \
+  --slices_dir "${TEST_SLICES_DIR_REL}/test/img" \
+  --out_dir "${PRED_SLICES_DIR_REL}" \
+  --model_path "${MODEL_PATH_REL}" \
+  --device "cuda" \
+  --batch_size "${BATCH_SIZE}" \
+  --num_classes "${NUM_CLASSES}"
+echo "[OK] Predicted masks at: ${PRED_SLICES_DIR_REL}"
+
+# ------------------------------
+# 3) Stitch per-slice preds back to 3D
+# ------------------------------
+echo "[STEP] Stitching 3D volumes…"
+mkdir -p "${STITCH_OUT_DIR_REL}"
+python -O stitch_new.py \
+  --data_folder "${PRED_SLICES_DIR_REL}" \
+  --dest_folder "${STITCH_OUT_DIR_REL}" \
+  --num_classes "${NUM_CLASSES}" \
+  --grp_regex "${GRP_REGEX}" \
+  --source_scan_pattern "${SOURCE_SCAN_PATTERN}"
+echo "[OK] Stitched volumes at: ${STITCH_OUT_DIR_REL}"
+
+# ------------------------------
+# 4) Compute 3D metrics (if GT available)
+# ------------------------------
+if [[ -d "${REF_GT_DIR_REL}" ]]; then
+  echo "[STEP] Computing metrics vs GT: ${REF_GT_DIR_REL}"
+  mkdir -p "${METRICS_OUT_DIR_REL}"
+  python -O distorch/compute_metrics.py \
+    --ref_folder "${REF_GT_DIR_REL}" \
+    --pred_folder "${STITCH_OUT_DIR_REL}" \
+    --ref_extension .nii.gz \
+    --pred_extension .nii.gz \
+    --num_classes "${NUM_CLASSES}" \
+    --metrics 3d_dice 3d_hd95 3d_jaccard 3d_assd \
+    --save_folder "${METRICS_OUT_DIR_REL}" \
+    --overwrite
+  echo "[OK] Metrics saved to: ${METRICS_OUT_DIR_REL}"
+else
+  echo "[WARN] Reference GT dir not found: ${REF_GT_DIR_REL} — skipping metrics."
+fi
+
+echo "[INFO] Inference job finished."
