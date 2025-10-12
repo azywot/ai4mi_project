@@ -35,3 +35,5 @@ train_results_arch/*/*
 !train_results_arch/*/metrics/
 !train_results_arch/*/metrics/*
 .png
+
+evaluation_results/
