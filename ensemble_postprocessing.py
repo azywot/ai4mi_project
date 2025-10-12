@@ -322,26 +322,27 @@ def ensure_aorta_constraints(mask):
 
 
 def multiple_component_analysis_postprocessing(segmentation, num_classes=5, 
-                                             min_component_size=100, 
-                                             max_components_per_class=3,
-                                             artifact_threshold=0.3,
-                                             connectivity_threshold=0.7):
+                                             min_component_size=50, 
+                                             max_components_per_class=1,
+                                             artifact_threshold=0.6,
+                                             connectivity_threshold=0.3):
     """
     Multiple Component Analysis (MCA) post-processing for artifact reduction
     
-    This method analyzes components within each class and filters out artifacts
-    based on size, shape, connectivity, and spatial relationships.
+    This method analyzes components within each class and selects only the best
+    (largest) component for each class to remove artifacts and noise.
+    Special handling for class 1 (aorta/esophagus) to preserve connected elements.
     
     Args:
         segmentation: Input segmentation array
         num_classes: Number of classes
         min_component_size: Minimum size for valid components
-        max_components_per_class: Maximum number of components to keep per class
-        artifact_threshold: Threshold for artifact detection (0-1)
+        max_components_per_class: Maximum number of components to keep per class (default: 1 - only best)
+        artifact_threshold: Threshold for artifact detection
         connectivity_threshold: Threshold for component connectivity analysis
     
     Returns:
-        Processed segmentation with artifacts removed
+        Processed segmentation with only the best component per class
     """
     processed = segmentation.copy().astype(np.int32)
     
@@ -351,14 +352,28 @@ def multiple_component_analysis_postprocessing(segmentation, num_classes=5,
         if np.sum(mask) == 0:
             continue
         
-        # Apply MCA-based artifact reduction
-        cleaned_mask = mca_artifact_reduction(
-            mask, 
-            min_component_size=min_component_size,
-            max_components=max_components_per_class,
-            artifact_threshold=artifact_threshold,
-            connectivity_threshold=connectivity_threshold
-        )
+        # Special handling for class 1 (aorta/esophagus) - try to preserve connected elements
+        if class_id == 1:
+            cleaned_mask = mca_artifact_reduction_with_connectivity(
+                mask, 
+                min_component_size=min_component_size,
+                artifact_threshold=artifact_threshold,
+                connectivity_threshold=connectivity_threshold
+            )
+        else:
+            # Standard MCA for other classes
+            cleaned_mask = mca_artifact_reduction(
+                mask, 
+                min_component_size=min_component_size,
+                max_components=1,  # Always select only the best component
+                artifact_threshold=artifact_threshold,
+                connectivity_threshold=connectivity_threshold
+            )
+        
+        # Fallback: if MCA removes everything, keep the largest component
+        if np.sum(cleaned_mask) == 0 and np.sum(mask) > 0:
+            print(f"Warning: MCA removed all components for class {class_id}, keeping largest component")
+            cleaned_mask = keep_largest_component(mask)
         
         processed[processed == class_id] = 0  # Clear original class
         processed[cleaned_mask] = class_id    # Set cleaned class
@@ -366,10 +381,28 @@ def multiple_component_analysis_postprocessing(segmentation, num_classes=5,
     return processed
 
 
-def mca_artifact_reduction(mask, min_component_size=100, max_components=3,
-                          artifact_threshold=0.3, connectivity_threshold=0.7):
+def keep_largest_component(mask):
     """
-    Multiple Component Analysis for artifact reduction
+    Keep only the largest connected component as fallback
+    """
+    if np.sum(mask) == 0:
+        return mask
+    
+    labeled = label(mask)
+    regions = regionprops(labeled)
+    
+    if len(regions) == 0:
+        return mask
+    
+    # Keep only the largest component
+    largest_region = max(regions, key=lambda x: x.area)
+    return (labeled == largest_region.label)
+
+
+def mca_artifact_reduction(mask, min_component_size=50, max_components=1,
+                          artifact_threshold=0.6, connectivity_threshold=0.3):
+    """
+    Multiple Component Analysis for artifact reduction with connectivity preservation
     
     Args:
         mask: Binary mask for a single class
@@ -379,21 +412,38 @@ def mca_artifact_reduction(mask, min_component_size=100, max_components=3,
         connectivity_threshold: Threshold for connectivity analysis
     
     Returns:
-        Cleaned binary mask with artifacts removed
+        Cleaned binary mask with artifacts removed but connected elements preserved
     """
     if np.sum(mask) == 0:
         return mask
     
-    # Step 1: Label connected components
-    labeled = label(mask)
+    # Ensure mask is binary
+    mask = mask.astype(bool)
+    
+    # Step 1: Fill holes first to connect nearby regions
+    mask_filled = ndimage.binary_fill_holes(mask)
+    
+    # Step 2: Apply gentle morphological operations to connect nearby components
+    if len(mask.shape) == 3:
+        selem = ball(1)  # Conservative structuring element
+    else:
+        selem = disk(1)  # Conservative structuring element
+    
+    # Gentle closing to connect nearby regions without creating artifacts
+    mask_connected = binary_closing(mask_filled, footprint=selem)
+    
+    # Step 3: Label connected components on the connected mask
+    labeled = label(mask_connected)
     regions = regionprops(labeled)
     
     if len(regions) == 0:
         return mask
     
-    # Step 2: Analyze component properties
+    # Step 4: Analyze component properties
     component_scores = []
     valid_components = []
+    
+    print(f"MCA: Analyzing {len(regions)} components for class (after connectivity enhancement)")
     
     for region in regions:
         # Calculate component features
@@ -402,34 +452,56 @@ def mca_artifact_reduction(mask, min_component_size=100, max_components=3,
         # Calculate artifact score (lower is better)
         artifact_score = calculate_artifact_score(features, artifact_threshold)
         
+        print(f"  Component {region.label}: area={region.area}, artifact_score={artifact_score:.3f}, connectivity={features['connectivity']:.3f}")
+        
         # Check if component meets minimum size requirement
         if region.area >= min_component_size:
             component_scores.append((region.label, artifact_score, features))
             valid_components.append(region.label)
+        else:
+            print(f"    -> Rejected: too small (area={region.area} < {min_component_size})")
     
     if not valid_components:
+        print("MCA: No valid components found, returning empty mask")
         return np.zeros_like(mask, dtype=bool)
     
-    # Step 3: Sort components by artifact score (ascending - less artifacts first)
-    component_scores.sort(key=lambda x: x[1])
+    print(f"MCA: {len(valid_components)} valid components found")
     
-    # Step 4: Select best components
+    # Step 5: Sort components by size first (largest first), then by artifact score
+    component_scores.sort(key=lambda x: (-x[2]['area'], x[1]))  # -area for descending order
+    
+    # Step 6: Select the best component (largest with acceptable artifact score)
     selected_components = []
-    for i, (label, score, features) in enumerate(component_scores):
+    for i, (comp_label, score, features) in enumerate(component_scores):
         if i >= max_components:
+            print(f"    -> Rejected: too many components (limit={max_components})")
             break
         
-        # Additional connectivity check for selected components
-        if features['connectivity'] >= connectivity_threshold:
-            selected_components.append(label)
+        # Check if component meets minimum size and has acceptable artifact score
+        if features['area'] >= min_component_size and score <= artifact_threshold:
+            selected_components.append(comp_label)
+            print(f"    -> Selected: component {comp_label} (area={features['area']}, score={score:.3f}, connectivity={features['connectivity']:.3f})")
+            break  # Only select the first (best) component
+        else:
+            if features['area'] < min_component_size:
+                print(f"    -> Rejected: too small (area={features['area']} < {min_component_size})")
+            if score > artifact_threshold:
+                print(f"    -> Rejected: high artifact score (score={score:.3f} > {artifact_threshold})")
     
-    # Step 5: Create cleaned mask
+    # Fallback: if no components selected, select the largest one anyway
+    if not selected_components and component_scores:
+        print("MCA: No components passed all checks, selecting largest component anyway")
+        largest_comp = component_scores[0]  # Already sorted by size
+        selected_components.append(largest_comp[0])
+        print(f"    -> Fallback selected: component {largest_comp[0]} (area={largest_comp[2]['area']}, score={largest_comp[1]:.3f})")
+    
+    # Step 7: Create cleaned mask from connected components
     cleaned_mask = np.zeros_like(mask, dtype=bool)
     for component_label in selected_components:
         cleaned_mask[labeled == component_label] = True
     
-    # Step 6: Apply final morphological cleaning
-    cleaned_mask = final_morphological_cleaning(cleaned_mask)
+    # Step 8: Apply final morphological cleaning with hole filling
+    cleaned_mask = final_morphological_cleaning_with_holes(cleaned_mask)
     
     return cleaned_mask
 
@@ -447,31 +519,64 @@ def analyze_component_features(region, image_shape):
     """
     features = {}
     
-    # Basic geometric features
-    features['area'] = region.area
-    features['perimeter'] = region.perimeter
-    features['eccentricity'] = region.eccentricity
-    features['solidity'] = region.solidity
-    features['extent'] = region.extent
-    
-    # Shape features
-    features['compactness'] = (region.perimeter ** 2) / (4 * np.pi * region.area) if region.area > 0 else float('inf')
-    features['aspect_ratio'] = region.major_axis_length / region.minor_axis_length if region.minor_axis_length > 0 else float('inf')
-    
-    # Spatial features
-    features['centroid_distance'] = calculate_centroid_distance(region, image_shape)
-    features['boundary_ratio'] = calculate_boundary_ratio(region, image_shape)
-    
-    # Connectivity features
-    features['connectivity'] = calculate_connectivity_score(region)
-    
-    # Density features
-    features['density'] = region.area / region.bbox_area if region.bbox_area > 0 else 0
+    try:
+        # Basic geometric features (always available)
+        features['area'] = region.area
+        features['solidity'] = region.solidity
+        features['extent'] = region.extent
+        
+        # Handle 2D vs 3D specific properties
+        if len(image_shape) == 2:  # 2D image
+            features['perimeter'] = region.perimeter
+            features['eccentricity'] = region.eccentricity
+            features['compactness'] = (region.perimeter ** 2) / (4 * np.pi * region.area) if region.area > 0 else float('inf')
+            features['aspect_ratio'] = region.major_axis_length / region.minor_axis_length if region.minor_axis_length > 0 else float('inf')
+        else:  # 3D image - some properties not available
+            features['perimeter'] = 0  # Not applicable for 3D
+            features['eccentricity'] = 0.5  # Default value for 3D
+            features['compactness'] = 1.0  # Default value for 3D
+            features['aspect_ratio'] = 1.0  # Default value for 3D
+        
+        # Spatial features with error handling
+        try:
+            features['centroid_distance'] = calculate_centroid_distance(region, image_shape)
+        except Exception as e:
+            print(f"Warning: Error calculating centroid distance: {e}")
+            features['centroid_distance'] = 0.5  # Default middle value
+        
+        try:
+            features['boundary_ratio'] = calculate_boundary_ratio(region, image_shape)
+        except Exception as e:
+            print(f"Warning: Error calculating boundary ratio: {e}")
+            features['boundary_ratio'] = 0.0  # Default no boundary touch
+        
+        # Connectivity features
+        features['connectivity'] = calculate_connectivity_score(region, image_shape)
+        
+        # Density features
+        features['density'] = region.area / region.bbox_area if region.bbox_area > 0 else 0
+        
+    except Exception as e:
+        print(f"Warning: Error analyzing component features: {e}")
+        # Return default features if analysis fails
+        features = {
+            'area': region.area if hasattr(region, 'area') else 0,
+            'perimeter': 0,  # Default for both 2D and 3D
+            'eccentricity': 0.5,  # Default for both 2D and 3D
+            'solidity': region.solidity if hasattr(region, 'solidity') else 0.5,
+            'extent': region.extent if hasattr(region, 'extent') else 0.5,
+            'compactness': 1.0,  # Default for both 2D and 3D
+            'aspect_ratio': 1.0,  # Default for both 2D and 3D
+            'centroid_distance': 0.5,
+            'boundary_ratio': 0.0,
+            'connectivity': 0.5,
+            'density': 0.5
+        }
     
     return features
 
 
-def calculate_artifact_score(features, threshold=0.3):
+def calculate_artifact_score(features, threshold=0.6):
     """
     Calculate artifact score for a component (0-1, lower is better)
     
@@ -484,31 +589,31 @@ def calculate_artifact_score(features, threshold=0.3):
     """
     score = 0.0
     
-    # Shape-based artifact indicators
-    if features['eccentricity'] > 0.9:  # Very elongated
-        score += 0.2
-    if features['solidity'] < 0.5:  # Very irregular
-        score += 0.2
-    if features['compactness'] > 2.0:  # Very non-compact
-        score += 0.15
-    if features['aspect_ratio'] > 5.0:  # Very elongated
-        score += 0.15
+    # Shape-based artifact indicators (less aggressive)
+    if features['eccentricity'] > 0.95:  # Very elongated (increased threshold)
+        score += 0.15  # Reduced penalty
+    if features['solidity'] < 0.3:  # Very irregular (reduced threshold)
+        score += 0.15  # Reduced penalty
+    if features['perimeter'] > 0 and features['compactness'] > 3.0:  # Very non-compact (increased threshold)
+        score += 0.1   # Reduced penalty
+    if features['aspect_ratio'] > 8.0:  # Very elongated (increased threshold)
+        score += 0.1   # Reduced penalty
     
-    # Size-based artifact indicators
-    if features['area'] < 50:  # Very small
-        score += 0.3
-    if features['density'] < 0.3:  # Very sparse
-        score += 0.1
+    # Size-based artifact indicators (less aggressive)
+    if features['area'] < 20:  # Very small (reduced threshold)
+        score += 0.2   # Reduced penalty
+    if features['density'] < 0.2:  # Very sparse (reduced threshold)
+        score += 0.05  # Reduced penalty
     
-    # Spatial-based artifact indicators
-    if features['centroid_distance'] > 0.8:  # Far from center
-        score += 0.1
-    if features['boundary_ratio'] > 0.7:  # Too close to boundary
-        score += 0.1
+    # Spatial-based artifact indicators (less aggressive)
+    if features['centroid_distance'] > 0.9:  # Far from center (increased threshold)
+        score += 0.05  # Reduced penalty
+    if features['boundary_ratio'] > 0.8:  # Too close to boundary (increased threshold)
+        score += 0.05  # Reduced penalty
     
-    # Connectivity-based artifact indicators
-    if features['connectivity'] < 0.5:  # Poor connectivity
-        score += 0.2
+    # Connectivity-based artifact indicators (less aggressive)
+    if features['connectivity'] < 0.2:  # Poor connectivity (reduced threshold)
+        score += 0.1   # Reduced penalty
     
     return min(score, 1.0)
 
@@ -519,6 +624,13 @@ def calculate_centroid_distance(region, image_shape):
     """
     image_center = np.array(image_shape) / 2
     centroid = np.array(region.centroid)
+    
+    # Ensure centroid and image_center have the same dimensions
+    if len(centroid) != len(image_center):
+        # Pad with zeros if needed
+        min_len = min(len(centroid), len(image_center))
+        centroid = centroid[:min_len]
+        image_center = image_center[:min_len]
     
     # Normalize by image diagonal
     max_distance = np.linalg.norm(image_shape)
@@ -534,20 +646,42 @@ def calculate_boundary_ratio(region, image_shape):
     bbox = region.bbox
     boundary_touches = 0
     
+    # Handle different dimensions properly
+    if len(image_shape) == 2:  # 2D image
+        # bbox format: (min_row, min_col, max_row, max_col)
+        bbox_starts = [bbox[0], bbox[1]]  # min_row, min_col
+        bbox_ends = [bbox[2], bbox[3]]    # max_row, max_col
+        image_sizes = list(image_shape)
+    elif len(image_shape) == 3:  # 3D image
+        # bbox format: (min_row, min_col, min_slice, max_row, max_col, max_slice)
+        bbox_starts = [bbox[0], bbox[1], bbox[2]]  # min_row, min_col, min_slice
+        bbox_ends = [bbox[3], bbox[4], bbox[5]]    # max_row, max_col, max_slice
+        image_sizes = list(image_shape)
+    else:
+        # Fallback for other dimensions
+        bbox_starts = bbox[::2]
+        bbox_ends = bbox[1::2]
+        image_sizes = list(image_shape)
+    
     # Check if component touches any image boundary
-    for i, (start, end, size) in enumerate(zip(bbox[::2], bbox[1::2], image_shape)):
+    for start, end, size in zip(bbox_starts, bbox_ends, image_sizes):
         if start <= 1 or end >= size - 1:
             boundary_touches += 1
     
     return boundary_touches / len(image_shape)
 
 
-def calculate_connectivity_score(region):
+def calculate_connectivity_score(region, image_shape):
     """
     Calculate connectivity score based on component properties
     """
-    # Higher solidity and lower eccentricity indicate better connectivity
-    connectivity = (region.solidity + (1 - region.eccentricity)) / 2
+    # Higher solidity indicates better connectivity
+    if len(image_shape) == 2:  # 2D image
+        # Higher solidity and lower eccentricity indicate better connectivity
+        connectivity = (region.solidity + (1 - region.eccentricity)) / 2
+    else:  # 3D image - eccentricity not available
+        # Use only solidity for 3D
+        connectivity = region.solidity
     return connectivity
 
 
@@ -572,6 +706,37 @@ def final_morphological_cleaning(mask):
     
     # Gentle closing to connect nearby regions
     cleaned = binary_closing(cleaned, footprint=selem)
+    
+    # Gentle opening to remove small protrusions
+    cleaned = binary_opening(cleaned, footprint=selem)
+    
+    return cleaned
+
+
+def final_morphological_cleaning_with_holes(mask):
+    """
+    Apply final morphological operations for cleaning with conservative hole filling
+    """
+    if np.sum(mask) == 0:
+        return mask
+    
+    # Remove very small objects
+    cleaned = remove_small_objects(mask, min_size=20)
+    
+    # Fill holes once
+    cleaned = ndimage.binary_fill_holes(cleaned)
+    
+    # Apply gentle smoothing
+    if len(mask.shape) == 3:
+        selem = ball(1)
+    else:
+        selem = disk(1)
+    
+    # Gentle closing to connect nearby regions and fill small gaps
+    cleaned = binary_closing(cleaned, footprint=selem)
+    
+    # Fill holes after closing
+    cleaned = ndimage.binary_fill_holes(cleaned)
     
     # Gentle opening to remove small protrusions
     cleaned = binary_opening(cleaned, footprint=selem)
@@ -619,14 +784,27 @@ def advanced_ensemble_postprocessing(segmentation, num_classes=5, method='ensemb
         processed = multi_label_fusion_postprocessing(processed, num_classes)
         return processed
     elif method == 'mca_combined':
-        # Apply MCA first, then other methods
+        # Apply post-processing in proper order:
+        # 1. Remove noise/artifacts (MCA)
+        # 2. Fill holes and smooth boundaries (ensemble voting)
+        # 3. Apply anatomical constraints (center constraints)
+        # 4. Final smoothing and refinement (ROI-based)
+        
+        # Step 1: Remove noise and artifacts using MCA
         processed = multiple_component_analysis_postprocessing(
             segmentation, num_classes, min_component_size, 
             max_components_per_class, artifact_threshold, connectivity_threshold
         )
+        
+        # Step 2: Fill holes and smooth boundaries
         processed = ensemble_voting_postprocessing(processed, num_classes)
-        processed = roi_based_postprocessing(processed, num_classes, roi_size)
+        
+        # Step 3: Apply anatomical constraints
         processed = center_constraint_postprocessing(processed, num_classes)
+        
+        # Step 4: Final smoothing and refinement
+        processed = roi_based_postprocessing(processed, num_classes, roi_size)
+        
         return processed
     else:
         raise ValueError(f"Unknown method: {method}")
@@ -634,13 +812,14 @@ def advanced_ensemble_postprocessing(segmentation, num_classes=5, method='ensemb
 
 def process_single_file(input_file, output_file, num_classes, method, roi_size,
                        min_component_size=100, max_components_per_class=3,
-                       artifact_threshold=0.3, connectivity_threshold=0.7):
+                       artifact_threshold=0.3, connectivity_threshold=0.7,
+                       separate_classes=False):
     """
     Process a single NIfTI file
     
     Args:
         input_file: Path to input NIfTI file
-        output_file: Path to output NIfTI file
+        output_file: Path to output NIfTI file (or folder if separate_classes=True)
         num_classes: Number of classes
         method: Processing method
         roi_size: Size of ROI for processing
@@ -648,6 +827,7 @@ def process_single_file(input_file, output_file, num_classes, method, roi_size,
         max_components_per_class: Maximum number of components per class (MCA method)
         artifact_threshold: Threshold for artifact detection (MCA method)
         connectivity_threshold: Threshold for connectivity analysis (MCA method)
+        separate_classes: If True, save one file per class; if False, save combined file
     """
     try:
         # Load segmentation
@@ -661,11 +841,30 @@ def process_single_file(input_file, output_file, num_classes, method, roi_size,
             artifact_threshold, connectivity_threshold
         )
         
-        # Save result
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        nib.save(nib.Nifti1Image(processed.astype(np.int32), img.affine, img.header), output_file)
+        if separate_classes:
+            # Save separate files for each class
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            base_name = input_file.stem.replace('.nii', '')  # Remove .nii.gz extension properly
+            
+            saved_files = 0
+            for class_id in range(1, num_classes):
+                # Create binary mask for this class
+                class_mask = (processed == class_id).astype(np.int32)
+                
+                # Only save if the class has any voxels
+                if np.sum(class_mask) > 0:
+                    class_output_file = output_file.parent / f"{base_name}_class_{class_id}.nii.gz"
+                    nib.save(nib.Nifti1Image(class_mask, img.affine, img.header), class_output_file)
+                    saved_files += 1
+                    print(f"  ✓ Saved class {class_id}: {class_output_file.name}")
+            
+            print(f"✓ Processed: {input_file.name} -> {saved_files} class files")
+        else:
+            # Save combined result (original behavior)
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            nib.save(nib.Nifti1Image(processed.astype(np.int32), img.affine, img.header), output_file)
+            print(f"✓ Processed: {input_file.name}")
         
-        print(f"✓ Processed: {input_file.name}")
         return True
         
     except Exception as e:
@@ -687,14 +886,16 @@ def main():
                        help='Post-processing method (default: ensemble)')
     parser.add_argument('--roi_size', type=int, default=128,
                        help='Size of ROI for processing (default: 128)')
-    parser.add_argument('--min_component_size', type=int, default=100,
-                       help='Minimum size for valid components in MCA method (default: 100)')
-    parser.add_argument('--max_components_per_class', type=int, default=3,
-                       help='Maximum number of components per class in MCA method (default: 3)')
-    parser.add_argument('--artifact_threshold', type=float, default=0.3,
-                       help='Threshold for artifact detection in MCA method (default: 0.3)')
-    parser.add_argument('--connectivity_threshold', type=float, default=0.7,
-                       help='Threshold for connectivity analysis in MCA method (default: 0.7)')
+    parser.add_argument('--min_component_size', type=int, default=50,
+                       help='Minimum size for valid components in MCA method (default: 50)')
+    parser.add_argument('--max_components_per_class', type=int, default=1,
+                       help='Maximum number of components per class in MCA method (default: 1 - only best component)')
+    parser.add_argument('--artifact_threshold', type=float, default=0.6,
+                       help='Threshold for artifact detection in MCA method (default: 0.6)')
+    parser.add_argument('--connectivity_threshold', type=float, default=0.3,
+                       help='Threshold for connectivity analysis in MCA method (default: 0.3)')
+    parser.add_argument('--separate_classes', action='store_true', default=False,
+                       help='Save separate files for each class (default: False - saves combined file)')
     parser.add_argument('--pattern', type=str, default='*.nii.gz',
                        help='File pattern to match (default: *.nii.gz)')
     
@@ -719,6 +920,9 @@ def main():
     print(f"Output folder: {args.output_folder}")
     print(f"Number of classes: {args.num_classes}")
     print(f"ROI size: {args.roi_size}")
+    # Determine output mode
+    separate_classes = args.separate_classes
+    print(f"Output mode: {'Separate files per class' if separate_classes else 'Combined file'}")
     if args.method in ['mca', 'mca_combined']:
         print(f"Min component size: {args.min_component_size}")
         print(f"Max components per class: {args.max_components_per_class}")
@@ -732,7 +936,8 @@ def main():
         output_file = args.output_folder / input_file.name
         if process_single_file(input_file, output_file, args.num_classes, args.method, args.roi_size,
                              args.min_component_size, args.max_components_per_class,
-                             args.artifact_threshold, args.connectivity_threshold):
+                             args.artifact_threshold, args.connectivity_threshold,
+                             separate_classes):
             success_count += 1
     
     print("-" * 50)
@@ -747,8 +952,11 @@ if __name__ == "__main__":
 # Basic MCA processing
 # python ensemble_postprocessing.py --input_folder /path/to/input --output_folder /path/to/output --method mca
 
-# # MCA with custom parameters for aggressive artifact removal
-# python ensemble_postprocessing.py --input_folder /path/to/input --output_folder /path/to/output --method mca --min_component_size 200 --max_components_per_class 2 --artifact_threshold 0.2
+# MCA with custom parameters (selects only the best/largest component per class)
+# python ensemble_postprocessing.py --input_folder /path/to/input --output_folder /path/to/output --method mca --min_component_size 30 --artifact_threshold 0.8
 
-# # MCA combined with other methods
+# MCA combined with other methods
 # python ensemble_postprocessing.py --input_folder /path/to/input --output_folder /path/to/output --method mca_combined
+
+# MCA with very permissive settings (if still losing components)
+# python ensemble_postprocessing.py --input_folder /path/to/input --output_folder /path/to/output --method mca --min_component_size 10 --artifact_threshold 0.9
