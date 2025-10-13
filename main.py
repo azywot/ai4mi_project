@@ -83,7 +83,7 @@ from losses import (CrossEntropy, DiceLoss, CEDiceLoss, FocalCrossEntropy,
                     MonaiDiceLossWrapper, MonaiGeneralizedDiceLossWrapper,
                     MonaiTverskyLossWrapper, MonaiDiceCELossWrapper,
                     MonaiFocalLossWrapper, MonaiHausdorffDTLossWrapper,
-                    HausdorffDTLikeLoss)
+                    HausdorffDTLikeLoss, DiceHausdorffLoss)
 
 
 # Dictionary to map model class names to their corresponding classes
@@ -569,6 +569,11 @@ def runTraining(args):
         loss_fn = MonaiHausdorffDTLossWrapper(idk=idk)
     elif args.loss == 'hausdorff':
         loss_fn = HausdorffDTLikeLoss(idk=idk)
+    elif args.loss == 'dicehausdorff':
+        loss_fn = DiceHausdorffLoss(idk=idk,
+                                    alpha_dice=args.dicehausdorff_alpha_dice,
+                                    beta_hausdorff=args.dicehausdorff_beta_hausdorff,
+                                    hausdorff_alpha=args.dicehausdorff_alpha)
     else:
         raise ValueError(f"Unknown loss: {args.loss}")
 
@@ -741,7 +746,12 @@ def runTraining(args):
             for data in val_loader:
                 img = data['images'].to(device)
                 gt = data['gts'].to(device)
-                pred_logits = net(img)
+                output = net(img)
+                # Handle potential deep supervision outputs
+                if isinstance(output, tuple):
+                    pred_logits = output[0]
+                else:
+                    pred_logits = output
                 pred_probs = F.softmax(1 * pred_logits, dim=1)
                 pred_seg = probs2one_hot(pred_probs)
                 log_dice_val[e, j_eval:j_eval + img.shape[0], :] = dice_coef(pred_seg, gt)
@@ -854,7 +864,7 @@ def main():
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
     parser.add_argument('--loss', default='ce', choices=['ce', 'dice', 'cedice', 'focal', 'gdl', 'tversky', 'dicefocal',
                                                          'monai_dice', 'monai_gdl', 'monai_tversky', 'monai_dicece', 'monai_focal',
-                                                         'monai_hausdorffdt', 'hausdorff'],
+                                                         'monai_hausdorffdt', 'hausdorff', 'dicehausdorff'],
                         help="Loss function to use for training")
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
@@ -896,6 +906,12 @@ def main():
                         help="Optional focal alpha weight for background class (if set)")
     parser.add_argument('--dicefocal_alpha_fg', type=float, default=None,
                         help="Optional focal alpha weight for foreground classes (if set)")
+    parser.add_argument('--dicehausdorff_alpha_dice', type=float, default=0.6,
+                        help="Weight for Dice term in Dice+Hausdorff (alpha_dice)")
+    parser.add_argument('--dicehausdorff_beta_hausdorff', type=float, default=0.4,
+                        help="Weight for Hausdorff term in Dice+Hausdorff (beta_hausdorff)")
+    parser.add_argument('--dicehausdorff_alpha', type=float, default=2.0,
+                        help="Alpha parameter for Hausdorff distance power")
     parser.add_argument('--optimizer', type=str, default='novograd', choices=['adamw', 'sam', 'novograd', 'ranger', 'clmr'],
                         help="Optimizer to use for training (default: novograd)")
     parser.add_argument('--use_scheduler', action='store_true', default=False,

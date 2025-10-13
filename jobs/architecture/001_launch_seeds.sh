@@ -1,15 +1,15 @@
 #!/bin/bash
-
+$HOME="/scratch-shared/ai4mi-group-9/"
 # ------------------------------
 # User-tweakable
 # ------------------------------
-PROJECT_DIR="${PROJECT_DIR:-$HOME/ai4mi_project}"
+PROJECT_DIR="${PROJECT_DIR:-/scratch-shared/ai4mi-group-9/ai4mi_project}"
 JOB_SCRIPT="${JOB_SCRIPT:-${PROJECT_DIR}/jobs/architecture/000_run_seed.job}"
 
 # Slurm resources (can be overridden via env or CLI if you wish)
-PARTITION="${PARTITION:-gpu_h100}"
+PARTITION="${PARTITION:-gpu_a100}"
 GPUS="${GPUS:-1}"
-CPUS_PER_TASK="${CPUS_PER_TASK:-9}"
+CPUS_PER_TASK="${CPUS_PER_TASK:-1}"
 TIME_LIMIT="${TIME_LIMIT:-06:00:00}"
 OUTPUT_DIR_REL="out"
 
@@ -22,9 +22,9 @@ RUN_PREP_FIRST="${RUN_PREP_FIRST:-false}" # Optional: run a single prep job firs
 SEEDS=(42 37 420)
 # Training config to export
 EPOCHS="${EPOCHS:-25}"
-RUN_NAME="${RUN_NAME:-transunet_ranger_cedice}"
+RUN_NAME="${RUN_NAME:-transunetlite_ranger_ce}"
 RESULTS_DIR="${RESULTS_DIR:-train_results}"
-EXTRA_PARAMS="${EXTRA_PARAMS:---model_class TransUNet --optimizer ranger --loss cedice --cedice_alpha 0.3 --cedice_beta 0.7 --use_scheduler --grad_clip 1.0}"
+EXTRA_PARAMS="${EXTRA_PARAMS:---model_class TransUNet --optimizer ranger --loss ce --use_scheduler --grad_clip 1.0}"
 
 mkdir -p "${PROJECT_DIR}/${OUTPUT_DIR_REL}"
 USER_NAME=$(whoami)

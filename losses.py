@@ -77,8 +77,8 @@ class DiceLoss:
         p = pred_softmax[:, self.idk, ...]
         t = weak_target[:, self.idk, ...].float()
 
-        # Compute per-class dice and then average
-        dims = (0, 2, 3)
+        # Compute per-sample, per-class dice and then average (stable with class absences)
+        dims = (2, 3)
         intersection = (p * t).sum(dim=dims)
         cardinality = p.sum(dim=dims) + t.sum(dim=dims)
         dice_per_class = (2.0 * intersection + self.eps) / (cardinality + self.eps)
@@ -127,7 +127,11 @@ class FocalCrossEntropy:
             if isinstance(self.alpha, (list, tuple)):
                 device = focal.device
                 alpha_vec = torch.tensor(self.alpha, dtype=focal.dtype, device=device)
-                alpha_map = alpha_vec[self.idk].view(1, -1, 1, 1)
+                # If provided as full class vector, gather; if already aligned with selected channels, use directly
+                if alpha_vec.numel() == focal.shape[1]:
+                    alpha_map = alpha_vec.view(1, -1, 1, 1)
+                else:
+                    alpha_map = alpha_vec[self.idk].view(1, -1, 1, 1)
                 focal = alpha_map * focal
             else:
                 focal = self.alpha * focal
@@ -188,7 +192,7 @@ class TverskyLoss:
         p = pred_softmax[:, self.idk, ...]
         t = weak_target[:, self.idk, ...].float()
 
-        dims = (0, 2, 3)
+        dims = (2, 3)
         tp = (p * t).sum(dim=dims)
         fp = (p * (1.0 - t)).sum(dim=dims)
         fn = ((1.0 - p) * t).sum(dim=dims)
@@ -302,16 +306,12 @@ class MonaiFocalLossWrapper:
     def __init__(self, gamma: float = 2.0, **kwargs):
         self.idk = kwargs['idk']
         self.gamma = gamma
-        self._loss = MonaiFocal(gamma=gamma)
-        print(f"Initialized {self.__class__.__name__} with idk={self.idk}, gamma={gamma}")
+        # Use probabilities directly; disable logits and onehot conversion
+        self._loss = MonaiFocal(gamma=gamma, logits=False, to_onehot_y=False)
+        print(f"Initialized {self.__class__.__name__} with idk={self.idk}, gamma={gamma}, logits=False")
 
     def __call__(self, pred_softmax: torch.Tensor, weak_target: torch.Tensor) -> torch.Tensor:
-        # MONAI Focal expects logits or probabilities? Its FocalLoss supports logits; we have probabilities.
-        # We'll compute on probabilities by converting to per-pixel class index and one-hot remains; Monai FocalLoss expects logits by default.
-        # To stay within our pipeline, convert probabilities to logits safely.
-        eps = 1e-10
-        logits = torch.log(torch.clamp(pred_softmax, min=eps))  # log-probs as logits surrogate
-        p = logits[:, self.idk, ...]
+        p = pred_softmax[:, self.idk, ...]
         t = weak_target[:, self.idk, ...].float()
         return self._loss(p, t)
 
@@ -325,7 +325,7 @@ class MonaiHausdorffDTLossWrapper:
         # MONAI HausdorffDTLoss expects logits by default, but accepts probs if sigmoid/softmax is False
         # We'll pass probabilities directly, matching other wrappers, after masking channels.
         # alpha controls the distance transform power; defaults to 2.0 in MONAI
-        self._loss = MonaiHausdorffDT(include_background=include_background, alpha=alpha)
+        self._loss = MonaiHausdorffDT(include_background=include_background, to_onehot_y=False, softmax=False, alpha=alpha)
         print(f"Initialized {self.__class__.__name__} with idk={self.idk}, include_background={include_background}, alpha={alpha}")
 
     def __call__(self, pred_softmax: torch.Tensor, weak_target: torch.Tensor) -> torch.Tensor:
@@ -378,3 +378,59 @@ class HausdorffDTLikeLoss:
 
         denom = (B * C) if (B * C) > 0 else 1
         return total / denom
+
+
+class ClassPresenceLoss:
+    def __init__(self, **kwargs):
+        # Encourages image-level presence consistency between prediction and target
+        self.idk = kwargs['idk']
+        self.eps: float = kwargs['eps'] if 'eps' in kwargs else 1e-6
+        print(f"Initialized {self.__class__.__name__} with idk={self.idk}")
+
+    def __call__(self, pred_softmax: torch.Tensor, weak_target: torch.Tensor) -> torch.Tensor:
+        assert pred_softmax.shape == weak_target.shape
+        assert simplex(pred_softmax)
+        assert sset(weak_target, [0, 1])
+
+        p = torch.clamp(pred_softmax[:, self.idk, ...], min=self.eps, max=1.0 - self.eps)
+        t = weak_target[:, self.idk, ...].float()
+
+        # Image-level presence indicator
+        presence_true = (t.sum(dim=(2, 3)) > 0).float()  # (B, C)
+        # Noisy-OR aggregator over pixels for presence probability
+        log_not_p = torch.log(1.0 - p)
+        presence_pred = 1.0 - torch.exp(log_not_p.sum(dim=(2, 3)))  # (B, C)
+
+        # Stable BCE
+        presence_pred = torch.clamp(presence_pred, min=self.eps, max=1.0 - self.eps)
+        bce = - (presence_true * torch.log(presence_pred) + (1.0 - presence_true) * torch.log(1.0 - presence_pred))
+        return bce.mean()
+
+
+class DiceHausdorffLoss:
+    def __init__(self, alpha_dice: float = 0.6, beta_hausdorff: float = 0.4, hausdorff_alpha: float = 2.0, presence_w: float = 0.2, **kwargs):
+        """
+        Hybrid loss combining Dice (region overlap) and Hausdorff Distance Transform (boundary accuracy).
+        
+        Args:
+            alpha_dice: Weight for Dice loss term (default: 0.6)
+            beta_hausdorff: Weight for Hausdorff DT loss term (default: 0.4)
+            hausdorff_alpha: Alpha parameter for Hausdorff distance power (default: 2.0)
+            presence_w: Weight for image-level class presence regularizer (default: 0.2)
+            **kwargs: Must include 'idk' for class indices
+        """
+        self.idk = kwargs['idk']
+        self.alpha_dice = alpha_dice
+        self.beta_hausdorff = beta_hausdorff
+        self.presence_w = presence_w
+        self._dice = DiceLoss(idk=self.idk)
+        self._hausdorff = MonaiHausdorffDTLossWrapper(idk=self.idk, alpha=hausdorff_alpha)
+        self._presence = ClassPresenceLoss(idk=self.idk)
+        print(f"Initialized {self.__class__.__name__} with alpha_dice={alpha_dice}, "
+              f"beta_hausdorff={beta_hausdorff}, hausdorff_alpha={hausdorff_alpha}, presence_w={presence_w}, idk={self.idk}")
+
+    def __call__(self, pred_softmax: torch.Tensor, weak_target: torch.Tensor) -> torch.Tensor:
+        dice_loss = self._dice(pred_softmax, weak_target)
+        hausdorff_loss = self._hausdorff(pred_softmax, weak_target)
+        presence_loss = self._presence(pred_softmax, weak_target)
+        return self.alpha_dice * dice_loss + self.beta_hausdorff * hausdorff_loss + self.presence_w * presence_loss

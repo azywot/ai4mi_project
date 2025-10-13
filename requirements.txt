@@ -9,3 +9,5 @@ matplotlib
 monai
 torch-optimizer
 batchgenerators
+opencv-python
+wandb
