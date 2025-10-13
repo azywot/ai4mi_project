@@ -66,7 +66,7 @@ def _expand_paths(parts: List[str]) -> List[Path]:
 
 
 def parse_groups(group_args: List[str]) -> List[Tuple[str, List[Path]]]:
-    groups: List[Tuple[str, List[Path]]] = []
+    groups: List[Tuple[str, List[Path]] ] = []
     for g in group_args:
         if ":" not in g:
             raise ValueError(f"--group expects NAME:paths, got: {g}")
@@ -77,6 +77,19 @@ def parse_groups(group_args: List[str]) -> List[Tuple[str, List[Path]]]:
             raise ValueError(f"No directories resolved for group '{name}' from: {paths_str}")
         groups.append((name, dirs))
     return groups
+
+
+def parse_color_overrides(color_args: List[str]) -> Dict[str, str]:
+    """
+    Parse repeated --color 'Name:#RRGGBB' overrides into a mapping.
+    """
+    overrides: Dict[str, str] = {}
+    for item in color_args:
+        if ":" not in item:
+            raise ValueError(f"--color expects NAME:#RRGGBB, got: {item}")
+        name, color = item.split(":", 1)
+        overrides[name.strip()] = color.strip()
+    return overrides
 
 
 def _normalize_metric_array(arr: np.ndarray, seed_dir: Path, metric: str) -> np.ndarray:
@@ -229,15 +242,18 @@ def make_plot(
     align: str = "union",
     debug: bool = False,
     show_avg: bool = True,
+    color_overrides: Optional[Dict[str, str]] = None,
 ):
     plt.style.use("seaborn-v0_8-whitegrid")
     fig, ax = plt.subplots(figsize=(10, 7))
 
-    # Fixed palette: 1) Baseline yellow, 2) Full blue, 3) Pink, then others
+    # Fixed palette: 1) Baseline yellow, 2) Full blue, 3) Pink, 4) Green, ...
     colors = ["#FDBF00", "#1f77b4", "#e377c2", "#2ca02c", "#9467bd", "#8c564b"]
     markers = ["o", "^", "s", "D", "v", "P"]
     color_cycle = itertools.cycle(colors)
     marker_cycle = itertools.cycle(markers)
+
+    color_overrides = color_overrides or {}
 
     group_data = []
     common_ids = None
@@ -251,7 +267,7 @@ def make_plot(
 
     styles: Dict[str, Tuple[str, str]] = {}
     for name, dice_p, hd95_p, _ in group_data:
-        c = next(color_cycle)
+        c = color_overrides.get(name, next(color_cycle))
         m = next(marker_cycle)
         styles[name] = (c, m)
         ax.scatter(dice_p, hd95_p, s=42, c=c, marker=m, alpha=0.9, label=name, edgecolor="none")
@@ -308,11 +324,19 @@ def main():
                     help="Patient alignment across seeds: 'union' keeps all available patients (NaN-safe).")
     ap.add_argument("--debug", action="store_true", help="Print per-seed shapes and resolved counts.")
     ap.add_argument("--no_avg", action="store_true", help="Hide star markers for per-group patient averages.")
+    ap.add_argument(
+        "--color",
+        action="append",
+        default=[],
+        help='Override a group color as "Name:#RRGGBB" (repeatable). Example: --color "MyModel:#2ca02c"',
+    )
     args = ap.parse_args()
 
     groups = parse_groups(args.group)
     if not groups:
         raise SystemExit("Provide at least one --group")
+
+    color_overrides = parse_color_overrides(args.color) if args.color else {}
 
     make_plot(
         groups=groups,
@@ -324,6 +348,7 @@ def main():
         align=args.align,
         debug=args.debug,
         show_avg=not args.no_avg,
+        color_overrides=color_overrides,
     )
 
 

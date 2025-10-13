@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --partition=gpu_a100
+#SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
 #SBATCH --job-name=segthor_train
 #SBATCH --ntasks=1
@@ -16,7 +16,17 @@ source ai4mi/bin/activate
 
 
 python dicevshd.py \
-  --group "Baseline:/home/scur1014/ai4mi_project/train_results_baseline/baseline_42/metrics,/home/scur1014/ai4mi_project/train_results_baseline/baseline_37/metrics,/home/scur1014/ai4mi_project/train_results_baseline/baseline_420/metrics" \
-  --group "Full:/home/scur1014/ai4mi_project/prep_transU_ranger_cedice_sched_gradclip/prep_transU_ranger_cedice_sched_gradclip_42/metrics,/home/scur1014/ai4mi_project/prep_transU_ranger_cedice_sched_gradclip/prep_transU_ranger_cedice_sched_gradclip_37/metrics,/home/scur1014/ai4mi_project/prep_transU_ranger_cedice_sched_gradclip/prep_transU_ranger_cedice_sched_gradclip_420/metrics" \
-  --group "Ablation (no preprocessing):/home/scur1014/ai4mi_project/transU-ranger-cedice-sched-grad-clip_results/transU-ranger-cedice-sched-grad-clip_42/metrics,/home/scur1014/ai4mi_project/transU-ranger-cedice-sched-grad-clip_results/transU-ranger-cedice-sched-grad-clip_37/metrics,/home/scur1014/ai4mi_project/transU-ranger-cedice-sched-grad-clip_results/transU-ranger-cedice-sched-grad-clip_420/metrics" \
+  --group "Baseline:/home/abaielli/ai4mi_project/final_baseline/final_baseline_42/metrics,/home/abaielli/ai4mi_project/final_baseline/final_baseline_37/metrics,/home/abaielli/ai4mi_project/final_baseline/final_baseline_420/metrics" \
+  --group "Best Model:/home/abaielli/ai4mi_project/no_preprocessing_full/no_preprocessing_full_42/metrics,/home/abaielli/ai4mi_project/no_preprocessing_full/no_preprocessing_full_37/metrics,/home/abaielli/ai4mi_project/no_preprocessing_full/no_preprocessing_full_420/metrics" \
+  --group "Pre-processing + Best Model:/home/abaielli/ai4mi_project/best_model/best_model_37/metrics,/home/abaielli/ai4mi_project/best_model/best_model_420/metrics,/home/abaielli/ai4mi_project/best_model/best_model_420/metrics" \
+  --group "Pre_processing + Best Model + Post-processing: /home/abaielli/ai4mi_project/postprocessing_results_final/37/final,/home/abaielli/ai4mi_project/postprocessing_results_final/420/final,/home/abaielli/ai4mi_project/postprocessing_results_final/42/final" \
   --out plots/dsc_hd95_baseline_vs_full
+
+
+
+
+  
+#--group "Baseline + Pre-processing: /home/abaielli/ai4mi_project/best_prep/best_prep_42/metrics,/home/abaielli/ai4mi_project/best_prep/best_prep_37/metrics,/home/abaielli/ai4mi_project/best_prep/best_prep_420/metrics" \
+
+
+  # add final_baseline/final_baseline_42/metrics
